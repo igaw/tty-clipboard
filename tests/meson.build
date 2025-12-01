@@ -27,3 +27,29 @@ test('basic-clipboard-test',
   timeout: 30,
   is_parallel: false,
 )
+
+# Encoding tests
+test('encoding-text',
+  find_program('test-encoding-text.sh'),
+  args: [
+    cb_server.full_path(),
+    cb_client.full_path(),
+    meson.current_build_dir() / 'test-config',
+  ],
+  depends: [cert_files, cb_server, cb_client],
+  timeout: 30,
+  is_parallel: false,
+)
+
+test('encoding-binary',
+  find_program('test-encoding-binary.sh'),
+  args: [
+    cb_server.full_path(),
+    cb_client.full_path(),
+    meson.current_build_dir() / 'test-config',
+  ],
+  depends: [cert_files, cb_server, cb_client],
+  timeout: 30,
+  is_parallel: false,
+  should_fail: true,
+)
