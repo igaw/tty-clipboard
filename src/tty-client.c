@@ -9,6 +9,7 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <arpa/inet.h>
@@ -126,23 +127,86 @@ void write_to_server(SSL *ssl)
 		handle_error("read from stdin");
 }
 
+static void print_usage(const char *prog_name)
+{
+	printf("Usage: %s [OPTIONS] <read|write> <server_ip>\n", prog_name);
+	printf("\nA secure clipboard client for TTY environments.\n");
+	printf("\nCommands:\n");
+	printf("  read             Read clipboard content from server\n");
+	printf("  write            Write stdin content to server clipboard\n");
+	printf("\nOptions:\n");
+	printf("  -s, --sync       Use synchronous/blocking read mode\n");
+	printf("  -h, --help       Display this help message\n");
+	printf("  -v, --version    Display version information\n");
+	printf("\nExamples:\n");
+	printf("  %s write 192.168.1.100          # Write stdin to clipboard\n", prog_name);
+	printf("  %s read 192.168.1.100           # Read clipboard to stdout\n", prog_name);
+	printf("  %s read 192.168.1.100 --sync    # Read with sync mode\n", prog_name);
+	printf("\n");
+}
+
+static void print_version(void)
+{
+	printf("tty-cb-client version 0.1\n");
+	printf("License: GPL-2.0-only\n");
+}
+
 int main(int argc, char *argv[])
 {
-	if (argc < 3) {
-		fprintf(stderr, "Usage: %s <read/write> <server_ip> [sync]\n",
-			argv[0]);
+	int opt;
+	int sync = 0;
+	const char *role = NULL;
+	const char *server_ip = NULL;
+
+	static struct option long_options[] = {
+		{"sync",    no_argument, 0, 's'},
+		{"help",    no_argument, 0, 'h'},
+		{"version", no_argument, 0, 'v'},
+		{0, 0, 0, 0}
+	};
+
+	while ((opt = getopt_long(argc, argv, "shv", long_options, NULL)) != -1) {
+		switch (opt) {
+		case 's':
+			sync = 1;
+			break;
+		case 'h':
+			print_usage(argv[0]);
+			exit(EXIT_SUCCESS);
+		case 'v':
+			print_version();
+			exit(EXIT_SUCCESS);
+		default:
+			print_usage(argv[0]);
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	// Parse positional arguments
+	if (optind + 2 > argc) {
+		fprintf(stderr, "Error: Missing required arguments\n\n");
+		print_usage(argv[0]);
 		exit(EXIT_FAILURE);
 	}
 
-	const char *role = argv[1];
-	const char *server_ip = argv[2];
-	int server_port;
+	role = argv[optind];
+	server_ip = argv[optind + 1];
 
-	int sync = 0;
-	if (argc > 3) {
-		if (!strcmp("sync", argv[3]))
-			sync = 1;
+	// Validate role
+	if (strcmp(role, "read") != 0 && strcmp(role, "write") != 0) {
+		fprintf(stderr, "Error: Command must be 'read' or 'write'\n\n");
+		print_usage(argv[0]);
+		exit(EXIT_FAILURE);
 	}
+
+	// Set up signal handling
+	struct sigaction sa;
+	sa.sa_handler = handle_sigint;
+	sa.sa_flags = 0;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGINT, &sa, NULL);
+
+	int server_port;
 
 	if (!strcmp(role, "read")) {
 		if (sync)
@@ -151,13 +215,6 @@ int main(int argc, char *argv[])
 			server_port = READ_PORT;
 	} else
 		server_port = WRITE_PORT;
-
-	// Set up signal handling
-	struct sigaction sa;
-	sa.sa_handler = handle_sigint;
-	sa.sa_flags = 0;
-	sigemptyset(&sa.sa_mask);
-	sigaction(SIGINT, &sa, NULL);
 
 	SSL_CTX *ctx = init_ssl_context();
 

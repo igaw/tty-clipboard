@@ -8,6 +8,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <getopt.h>
 #include <signal.h>
 #include <pthread.h>
 #include <arpa/inet.h>
@@ -352,8 +353,88 @@ static void *start_server(void *data)
 	return NULL;
 }
 
-int main()
+static void print_usage(const char *prog_name)
 {
+	printf("Usage: %s [OPTIONS]\n", prog_name);
+	printf("\nA secure clipboard server for TTY environments.\n");
+	printf("\nOptions:\n");
+	printf("  -h, --help       Display this help message\n");
+	printf("  -v, --version    Display version information\n");
+	printf("  -d, --daemon     Run in daemon mode (background)\n");
+	printf("\nPorts:\n");
+	printf("  %d              Read port (non-blocking)\n", READ_PORT);
+	printf("  %d              Write port\n", WRITE_PORT);
+	printf("  %d              Read port (blocking/sync)\n", READ_BLOCKED_PORT);
+	printf("\nThe server listens on all interfaces (0.0.0.0) by default.\n");
+	printf("Client authentication is required via mutual TLS.\n");
+	printf("\n");
+}
+
+static void print_version(void)
+{
+	printf("tty-cb-server version 0.1\n");
+	printf("License: GPL-2.0-only\n");
+}
+
+int main(int argc, char *argv[])
+{
+	int opt;
+	int daemon_mode = 0;
+
+	static struct option long_options[] = {
+		{"help",    no_argument, 0, 'h'},
+		{"version", no_argument, 0, 'v'},
+		{"daemon",  no_argument, 0, 'd'},
+		{0, 0, 0, 0}
+	};
+
+	while ((opt = getopt_long(argc, argv, "hvd", long_options, NULL)) != -1) {
+		switch (opt) {
+		case 'h':
+			print_usage(argv[0]);
+			exit(EXIT_SUCCESS);
+		case 'v':
+			print_version();
+			exit(EXIT_SUCCESS);
+		case 'd':
+			daemon_mode = 1;
+			break;
+		default:
+			print_usage(argv[0]);
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	if (daemon_mode) {
+		// Simple daemonization
+		pid_t pid = fork();
+		if (pid < 0) {
+			perror("Failed to fork");
+			exit(EXIT_FAILURE);
+		}
+		if (pid > 0) {
+			// Parent process exits
+			printf("Server started in background with PID: %d\n", pid);
+			exit(EXIT_SUCCESS);
+		}
+		// Child continues
+		setsid();
+		if (chdir("/") < 0) {
+			perror("Failed to change directory");
+			exit(EXIT_FAILURE);
+		}
+		close(STDIN_FILENO);
+		close(STDOUT_FILENO);
+		close(STDERR_FILENO);
+	}
+
+	// Set up signal handling
+	struct sigaction sa;
+	sa.sa_handler = handle_sigint;
+	sa.sa_flags = 0;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGINT, &sa, NULL);
+
 	SSL_CTX *ctx = init_ssl_context();
 	struct server_args args_read = { .port = READ_PORT,
 					   .ctx = ctx,
@@ -364,13 +445,6 @@ int main()
 	struct server_args args_read_blocked = { .port = READ_BLOCKED_PORT,
 						   .ctx = ctx,
 						   .handler = read_blocked_handler };
-
-	// Set up signal handling
-	struct sigaction sa;
-	sa.sa_handler = handle_sigint;
-	sa.sa_flags = 0;
-	sigemptyset(&sa.sa_mask);
-	sigaction(SIGINT, &sa, NULL);
 
 	// Start server on two ports for reading and writing
 	pthread_t read_thread, write_thread, read_blocked_thread;
