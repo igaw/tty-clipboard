@@ -1,9 +1,17 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
-cb_server = executable('tty-cb-server', ['tty-server.c', 'tty-clipboard.c'],
+# Generate config header
+config_conf = configuration_data()
+config_conf.set_quoted('VERSION', meson.project_version())
+config_h = configure_file(
+  output: 'config.h',
+  configuration: config_conf
+)
+
+cb_server = executable('tty-cb-server', ['tty-server.c', 'tty-clipboard.c', config_h],
   dependencies: [openssl_dep],
   install : true)
 
-cb_client = executable('tty-cb-client', ['tty-client.c', 'tty-clipboard.c'],
+cb_client = executable('tty-cb-client', ['tty-client.c', 'tty-clipboard.c', config_h],
   dependencies: [openssl_dep],
   install : true)

@@ -2,6 +2,7 @@
 /* Copyright (C) 2024 Daniel Wagner <wagi@monom.org> */
 
 #include "tty-clipboard.h"
+#include "config.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -373,7 +374,7 @@ static void print_usage(const char *prog_name)
 
 static void print_version(void)
 {
-	printf("tty-cb-server version 0.1\n");
+	printf("tty-cb-server version %s\n", VERSION);
 	printf("License: GPL-2.0-only\n");
 }
 
