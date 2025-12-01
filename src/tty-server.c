@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <signal.h>
 #include <pthread.h>
 #include <arpa/inet.h>
@@ -23,7 +24,7 @@ volatile sig_atomic_t terminate = 0;
 // Signal handler
 void handle_sigint(int sig __attribute__((unused)))
 {
-	printf("%s:%d signal caugth\n", __func__, __LINE__);
+	printf("%s:%d signal caught\n", __func__, __LINE__);
 	pthread_mutex_lock(&buffer_mutex);
 	terminate = 1; // Set the termination flag
 	pthread_cond_broadcast(
@@ -161,7 +162,7 @@ void *read_handler(void *arg)
 	if (SSL_shutdown(ssl) == 0) {
 		// The first call to SSL_shutdown() sends a close_notify alert to the client
 		if (SSL_shutdown(ssl) == 1) {
-			// succcess
+			// success
 		}
 	}
 	SSL_free(ssl);
@@ -211,7 +212,7 @@ out:
 	if (SSL_shutdown(ssl) == 0) {
 		// The first call to SSL_shutdown() sends a close_notify alert to the client
 		if (SSL_shutdown(ssl) == 1) {
-			// succcess
+			// success
 		}
 	}
 	SSL_free(ssl);
@@ -237,7 +238,7 @@ static void *start_server(void *data)
 		exit(EXIT_FAILURE);
 	}
 
-	int opt = -1;
+	int opt = 1;
 	// Set socket options to reuse address
 	if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
 		perror("setsockopt failed");
@@ -321,6 +322,7 @@ static void *start_server(void *data)
 			close(client_fd);
 			continue;
 		}
+		X509_free(cert);
 
 		long verify_result = SSL_get_verify_result(ssl);
 		if (verify_result != X509_V_OK) {
