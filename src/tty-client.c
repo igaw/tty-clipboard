@@ -33,12 +33,12 @@ SSL_CTX *init_ssl_context()
 	_cleanup_free_ char *ca = NULL;
 
 	if (asprintf(&crt, "%s/certs/client.crt", path) < 0) {
-		perror("Unable to create path for server certificate\n");
+		perror("Unable to create path for client certificate\n");
 		exit(EXIT_FAILURE);
 	}
 
 	if (asprintf(&key, "%s/keys/client.key", path) < 0) {
-		perror("Unable to create path for server key\n");
+		perror("Unable to create path for client key\n");
 		exit(EXIT_FAILURE);
 	}
 
@@ -80,6 +80,9 @@ SSL_CTX *init_ssl_context()
 		exit(EXIT_FAILURE);
 	}
 
+	// Enable server certificate verification
+	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+
 	return ctx;
 }
 
@@ -96,14 +99,8 @@ void read_from_server(SSL *ssl)
 
 	while ((bytes_read = SSL_read(ssl, buffer, BUFFER_SIZE - 1)) > 0) {
 		buffer[bytes_read] = 0;
-		//size_t len = strlen(buffer);
-		//printf("len %ld, buffer '%s'\n", len, buffer);
 		fprintf(stdout, "%s\n", buffer);
 		fflush(stdout);
-
-	//	if (write(STDOUT_FILENO, buffer, len) != bytes_read)
-	//		handle_error("write to stdout");
-		// printf("\n");
 	}
 	if (bytes_read < 0)
 		handle_error("SSL_read");
@@ -113,16 +110,14 @@ void write_to_server(SSL *ssl)
 {
 	char buffer[BUFFER_SIZE];
 	ssize_t bytes_read, bytes_written;
-//	printf("%s:%d\n", __func__, __LINE__);
 
 	while ((bytes_read = read(STDIN_FILENO, buffer, BUFFER_SIZE - 1)) > 0) {
 		buffer[bytes_read] = 0;
 		size_t len = strlen(buffer);
-		if (buffer[len - 1] == '\n') {
+		if (len > 0 && buffer[len - 1] == '\n') {
 			buffer[len - 1] = '\0';
 			len--;
 		}
-//		printf("len %ld buffer '%s'\n", len, buffer);
 		bytes_written = SSL_write(ssl, buffer, len);
 		if (bytes_written <= 0)
 			handle_error("error writing to server");
@@ -133,7 +128,7 @@ void write_to_server(SSL *ssl)
 
 int main(int argc, char *argv[])
 {
-	if (argc < 2) {
+	if (argc < 3) {
 		fprintf(stderr, "Usage: %s <read/write> <server_ip> [sync]\n",
 			argv[0]);
 		exit(EXIT_FAILURE);
@@ -194,6 +189,17 @@ int main(int argc, char *argv[])
 		ERR_print_errors_fp(stderr);
 		SSL_free(ssl);
 		close(sock);
+		exit(EXIT_FAILURE);
+	}
+
+	// Verify the server's certificate
+	long verify_result = SSL_get_verify_result(ssl);
+	if (verify_result != X509_V_OK) {
+		fprintf(stderr, "Server certificate verification failed: %ld\n",
+			verify_result);
+		SSL_free(ssl);
+		close(sock);
+		SSL_CTX_free(ctx);
 		exit(EXIT_FAILURE);
 	}
 
