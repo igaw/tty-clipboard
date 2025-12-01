@@ -51,5 +51,4 @@ test('encoding-binary',
   depends: [cert_files, cb_server, cb_client],
   timeout: 30,
   is_parallel: false,
-  should_fail: true,
 )

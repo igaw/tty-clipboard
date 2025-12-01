@@ -16,9 +16,12 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <sys/select.h>
+#include <stdint.h>
+#include <endian.h>
 
 // Shared buffer and mutex
 char shared_buffer[BUFFER_SIZE];
+size_t shared_length = 0; // current length of data stored in shared_buffer
 unsigned int gen = 0;
 pthread_mutex_t buffer_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t buffer_cond = PTHREAD_COND_INITIALIZER;
@@ -100,96 +103,116 @@ SSL_CTX *init_ssl_context()
 	return ctx;
 }
 
+static int ssl_read_all(SSL *ssl, void *buf, size_t len)
+{
+	unsigned char *p = buf;
+	size_t total = 0;
+	while (total < len) {
+		int r = SSL_read(ssl, p + total, (int)(len - total));
+		if (r <= 0) {
+			int err = SSL_get_error(ssl, r);
+			if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+				continue;
+			return -1;
+		}
+		total += (size_t)r;
+	}
+	return 0;
+}
+
+static int ssl_write_all(SSL *ssl, const void *buf, size_t len)
+{
+	const unsigned char *p = buf;
+	size_t total = 0;
+	while (total < len) {
+		int w = SSL_write(ssl, p + total, (int)(len - total));
+		if (w <= 0) {
+			int err = SSL_get_error(ssl, w);
+			if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+				continue;
+			return -1;
+		}
+		total += (size_t)w;
+	}
+	return 0;
+}
+
 static void handle_write(SSL *ssl)
 {
-	char buffer[BUFFER_SIZE];
-
-	printf("%s:%d\n", __func__, __LINE__);
-
-	// Handle the client's communication
-	memset(buffer, 0, BUFFER_SIZE);
-	int bytes_read = SSL_read(ssl, buffer, BUFFER_SIZE - 1);
-	if (bytes_read <= 0) {
-		printf("Client disconnected or read error\n");
-		goto out;
+	uint64_t be_len = 0;
+	if (ssl_read_all(ssl, &be_len, sizeof(be_len)) < 0) {
+		printf("Failed to read length prefix\n");
+		return;
 	}
-
-	// Write received data to the shared buffer
+	size_t len = (size_t)be64toh(be_len);
+	if (len == 0) {
+		printf("Empty write received\n");
+		return;
+	}
+	if (len > BUFFER_SIZE) {
+		printf("Incoming payload %zu exceeds buffer size %u, truncating\n", len, (unsigned)BUFFER_SIZE);
+	}
+	size_t to_copy = len > BUFFER_SIZE ? BUFFER_SIZE : len;
+	unsigned char *tmp = malloc(len);
+	if (!tmp) {
+		perror("malloc");
+		return;
+	}
+	if (ssl_read_all(ssl, tmp, len) < 0) {
+		printf("Failed to read payload bytes\n");
+		free(tmp);
+		return;
+	}
 	pthread_mutex_lock(&buffer_mutex);
-	if (memcmp(buffer, shared_buffer, bytes_read)) {
-		strncpy(shared_buffer, buffer, BUFFER_SIZE);
-		gen++;
-		pthread_cond_signal(&buffer_cond);
-	}
+	memcpy(shared_buffer, tmp, to_copy);
+	shared_length = to_copy;
+	gen++;
+	pthread_cond_signal(&buffer_cond);
 	pthread_mutex_unlock(&buffer_mutex);
-	printf("Received from client: bytes_read %d buffer '%s'\n",
-	       bytes_read, buffer);
-
-out:
-	return;
+	printf("Stored %zu bytes (original %zu)\n", to_copy, len);
+	free(tmp);
 }
 
 static void handle_read(SSL *ssl)
 {
-	char buffer[BUFFER_SIZE];
-
-	// Handle the client's communication
-	pthread_mutex_lock(&buffer_mutex);
-	strncpy(buffer, shared_buffer, BUFFER_SIZE - 1);
-	buffer[BUFFER_SIZE - 1] = '\0';
-	pthread_mutex_unlock(&buffer_mutex);
-
-	int bytes_written = SSL_write(ssl, buffer, strlen(buffer));
-	printf("bytes_written %d buffer '%s'\n", bytes_written, buffer);
-
-	if (bytes_written <= 0) {
-		int ssl_error = SSL_get_error(ssl, bytes_written);
-		if (ssl_error != SSL_ERROR_WANT_READ &&
-		    ssl_error != SSL_ERROR_WANT_WRITE) {
-			fprintf(stderr, "SSL_write error: %d\n", ssl_error);
-		}
-	}
+    pthread_mutex_lock(&buffer_mutex);
+    size_t len = shared_length;
+    uint64_t be_len = htobe64((uint64_t)len);
+    int rc = ssl_write_all(ssl, &be_len, sizeof(be_len));
+    if (rc == 0 && len > 0)
+        rc = ssl_write_all(ssl, shared_buffer, len);
+    pthread_mutex_unlock(&buffer_mutex);
+    if (rc < 0)
+        printf("Failed to send read response\n");
+    else
+        printf("Sent %zu bytes to reader\n", len);
 }
 
 static void handle_read_blocked(SSL *ssl)
 {
-	char buffer[BUFFER_SIZE];
-	unsigned int seen = 0;
-
-	// Handle the client's communication
-
-	while (1) {
-		pthread_mutex_lock(&buffer_mutex);
-		if (seen == gen)
-			pthread_cond_wait(&buffer_cond, &buffer_mutex);
-		if (terminate) {
-			pthread_mutex_unlock(&buffer_mutex);
-			goto out;
-		}
-
-		seen = gen;
-
-		strncpy(buffer, shared_buffer, BUFFER_SIZE - 1);
-		buffer[BUFFER_SIZE - 1] = '\0';
-
-		int bytes_written = SSL_write(ssl, buffer, strlen(buffer));
-		printf("bytes_written %d buffer '%s'\n", bytes_written, buffer);
-
-		if (bytes_written <= 0) {
-			int ssl_error = SSL_get_error(ssl, bytes_written);
-			if (ssl_error != SSL_ERROR_WANT_READ &&
-			    ssl_error != SSL_ERROR_WANT_WRITE) {
-				fprintf(stderr, "SSL_write error: %d\n",
-					ssl_error);
-			}
-			pthread_mutex_unlock(&buffer_mutex);
-			goto out;
-		}
-		pthread_mutex_unlock(&buffer_mutex);
-	}
-
-out:
-	return;
+    unsigned int seen = 0;
+    while (!terminate) {
+        pthread_mutex_lock(&buffer_mutex);
+        while (seen == gen && !terminate) {
+            pthread_cond_wait(&buffer_cond, &buffer_mutex);
+        }
+        if (terminate) {
+            pthread_mutex_unlock(&buffer_mutex);
+            break;
+        }
+        seen = gen;
+        size_t len = shared_length;
+        uint64_t be_len = htobe64((uint64_t)len);
+        int rc = ssl_write_all(ssl, &be_len, sizeof(be_len));
+        if (rc == 0 && len > 0)
+            rc = ssl_write_all(ssl, shared_buffer, len);
+        pthread_mutex_unlock(&buffer_mutex);
+        if (rc < 0) {
+            printf("Failed to send blocked update\n");
+            break;
+        }
+        printf("Blocked reader sent %zu bytes\n", len);
+    }
 }
 
 // Unified client handler that reads command and dispatches

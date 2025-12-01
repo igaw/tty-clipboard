@@ -14,6 +14,8 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <arpa/inet.h>
+#include <stdint.h>
+#include <endian.h>
 
 volatile sig_atomic_t terminate = 0;
 
@@ -96,36 +98,75 @@ void handle_error(const char *msg)
 
 void read_from_server(SSL *ssl)
 {
-	char buffer[BUFFER_SIZE];
-	ssize_t bytes_read;
-
-	while ((bytes_read = SSL_read(ssl, buffer, BUFFER_SIZE - 1)) > 0) {
-		buffer[bytes_read] = 0;
-		fprintf(stdout, "%s\n", buffer);
-		fflush(stdout);
+	uint64_t be_len = 0;
+	if (SSL_read(ssl, &be_len, sizeof(be_len)) <= 0) {
+		handle_error("SSL_read length");
 	}
-	if (bytes_read < 0)
-		handle_error("SSL_read");
+	size_t len = (size_t)be64toh(be_len);
+	if (len == 0) return; // empty clipboard
+	unsigned char *buf = malloc(len);
+	if (!buf) handle_error("malloc");
+	size_t total = 0;
+	while (total < len) {
+		int r = SSL_read(ssl, buf + total, (int)(len - total));
+		if (r <= 0) handle_error("SSL_read payload");
+		total += (size_t)r;
+	}
+	fwrite(buf, 1, len, stdout);
+	if (buf[len-1] != '\n')
+		fflush(stdout);
+	free(buf);
 }
 
 void write_to_server(SSL *ssl)
 {
-	char buffer[BUFFER_SIZE];
-	ssize_t bytes_read, bytes_written;
-
-	while ((bytes_read = read(STDIN_FILENO, buffer, BUFFER_SIZE - 1)) > 0) {
-		buffer[bytes_read] = 0;
-		size_t len = strlen(buffer);
-		if (len > 0 && buffer[len - 1] == '\n') {
-			buffer[len - 1] = '\0';
-			len--;
+	// Read all stdin into a dynamic buffer
+	size_t cap = 4096, used = 0;
+	unsigned char *buf = malloc(cap);
+	if (!buf) handle_error("malloc");
+	while (1) {
+		if (used == cap) {
+			cap *= 2;
+			unsigned char *tmp = realloc(buf, cap);
+			if (!tmp) handle_error("realloc");
+			buf = tmp;
 		}
-		bytes_written = SSL_write(ssl, buffer, len);
-		if (bytes_written <= 0)
-			handle_error("error writing to server");
+		ssize_t r = read(STDIN_FILENO, buf + used, cap - used);
+		if (r < 0) handle_error("read stdin");
+		if (r == 0) break; // EOF
+		used += (size_t)r;
 	}
-	if (bytes_read < 0)
-		handle_error("read from stdin");
+	uint64_t be_len = htobe64((uint64_t)used);
+	if (SSL_write(ssl, &be_len, sizeof(be_len)) <= 0) handle_error("SSL_write length");
+	size_t total = 0;
+	while (total < used) {
+		int w = SSL_write(ssl, buf + total, (int)(used - total));
+		if (w <= 0) handle_error("SSL_write payload");
+		total += (size_t)w;
+	}
+	free(buf);
+}
+
+void read_from_server_blocked(SSL *ssl)
+{
+	while (!terminate) {
+		uint64_t be_len = 0;
+		int r = SSL_read(ssl, &be_len, sizeof(be_len));
+		if (r <= 0) break; // connection closed
+		size_t len = (size_t)be64toh(be_len);
+		if (len == 0) continue; // skip empty
+		unsigned char *buf = malloc(len);
+		if (!buf) handle_error("malloc");
+		size_t total = 0;
+		while (total < len) {
+			int rr = SSL_read(ssl, buf + total, (int)(len - total));
+			if (rr <= 0) { free(buf); handle_error("SSL_read blocked payload"); }
+			total += (size_t)rr;
+		}
+		fwrite(buf, 1, len, stdout);
+		fflush(stdout);
+		free(buf);
+	}
 }
 
 static void print_usage(const char *prog_name)
@@ -277,7 +318,10 @@ int main(int argc, char *argv[])
 
 	// Send or receive data based on the role
 	if (!strcmp(role, "read")) {
-		read_from_server(ssl);
+		if (sync)
+			read_from_server_blocked(ssl);
+		else
+			read_from_server(ssl);
 	} else if (!strcmp(role, "write")) {
 		write_to_server(ssl);
 	}

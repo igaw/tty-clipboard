@@ -26,20 +26,26 @@ sleep 2
 TMP_IN=$(mktemp)
 head -c 1024 /dev/urandom > "$TMP_IN"
 
+# Start blocking read (sync) before write; will capture first generation update
+TMP_OUT=$(mktemp)
+timeout 5 "$CLIENT_BIN" read 127.0.0.1 --sync > "$TMP_OUT" &
+SYNC_PID=$!
+sleep 1
+
 # Write binary to clipboard (current client treats data as C-strings, likely truncates at first NUL)
 cat "$TMP_IN" | "$CLIENT_BIN" write 127.0.0.1 || true
-sleep 0.5
+sleep 1
 
-# Read back
-TMP_OUT=$(mktemp)
-"$CLIENT_BIN" read 127.0.0.1 > "$TMP_OUT" || true
+# Wait for sync read to finish (or timeout)
+wait $SYNC_PID 2>/dev/null || true
 
-# Compare
+# Compare (now should match exactly with length-prefixed protocol)
 if cmp -s "$TMP_IN" "$TMP_OUT"; then
-  echo "Unexpected PASS: binary roundtrip matched"
+  echo "PASS: binary roundtrip matched (sync)"
   exit 0
 else
-  echo "Expected FAIL: binary differs (client/server treat payload as string)" >&2
-  # Return failure so Meson can mark should_fail
+  echo "FAIL: binary differs after roundtrip" >&2
+  hexdump -C "$TMP_IN" | head -n 5 >&2
+  hexdump -C "$TMP_OUT" | head -n 5 >&2
   exit 1
 fi
