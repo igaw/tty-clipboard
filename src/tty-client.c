@@ -16,7 +16,7 @@
 volatile sig_atomic_t terminate = 0;
 
 // Signal handler
-void handle_sigint(int sig)
+void handle_sigint(int sig __attribute__((unused)))
 {
 	terminate = 1; // Set the termination flag
 }

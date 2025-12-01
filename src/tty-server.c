@@ -21,7 +21,7 @@ pthread_cond_t buffer_cond = PTHREAD_COND_INITIALIZER;
 volatile sig_atomic_t terminate = 0;
 
 // Signal handler
-void handle_sigint(int sig)
+void handle_sigint(int sig __attribute__((unused)))
 {
 	printf("%s:%d signal caugth\n", __func__, __LINE__);
 	pthread_mutex_lock(&buffer_mutex);
