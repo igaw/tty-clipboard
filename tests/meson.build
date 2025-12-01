@@ -52,3 +52,39 @@ test('encoding-binary',
   timeout: 30,
   is_parallel: false,
 )
+
+test('large-transfer-4mb',
+  find_program('test-large-transfer.sh'),
+  args: [
+    cb_server.full_path(),
+    cb_client.full_path(),
+    meson.current_build_dir() / 'test-config',
+  ],
+  depends: [cert_files, cb_server, cb_client],
+  timeout: 60,
+  is_parallel: false,
+)
+
+test('max-size-limit',
+  find_program('test-max-size.sh'),
+  args: [
+    cb_server.full_path(),
+    cb_client.full_path(),
+    meson.current_build_dir() / 'test-config',
+  ],
+  depends: [cert_files, cb_server, cb_client],
+  timeout: 30,
+  is_parallel: false,
+)
+
+test('max-size-drop',
+  find_program('test-max-size-drop.sh'),
+  args: [
+    cb_server.full_path(),
+    cb_client.full_path(),
+    meson.current_build_dir() / 'test-config',
+  ],
+  depends: [cert_files, cb_server, cb_client],
+  timeout: 30,
+  is_parallel: false,
+)

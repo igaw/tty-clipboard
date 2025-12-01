@@ -144,6 +144,15 @@ void write_to_server(SSL *ssl)
 		if (w <= 0) handle_error("SSL_write payload");
 		total += (size_t)w;
 	}
+	// Read status byte from server (0=success, 1=reject)
+	unsigned char status = 0;
+	int r = SSL_read(ssl, &status, 1);
+	if (r <= 0) handle_error("SSL_read write-status");
+	if (status != 0) {
+		fprintf(stderr, "Write rejected by server (oversize or error)\n");
+		free(buf);
+		exit(EXIT_FAILURE);
+	}
 	free(buf);
 }
 

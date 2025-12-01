@@ -19,13 +19,19 @@
 #include <stdint.h>
 #include <endian.h>
 
-// Shared buffer and mutex
-char shared_buffer[BUFFER_SIZE];
-size_t shared_length = 0; // current length of data stored in shared_buffer
+// Shared buffer and mutex (dynamic)
+char *shared_buffer = NULL;
+size_t shared_capacity = 0;   // allocated size
+size_t shared_length = 0;     // used length
 unsigned int gen = 0;
 pthread_mutex_t buffer_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t buffer_cond = PTHREAD_COND_INITIALIZER;
 volatile sig_atomic_t terminate = 0;
+// Maximum allowed clipboard size (0 means unlimited)
+static size_t max_buffer_size = 0;
+// Oversize policy: reject (close connection) or drop (discard payload)
+typedef enum { OVERSIZE_REJECT = 0, OVERSIZE_DROP = 1 } oversize_policy_t;
+static oversize_policy_t oversize_policy = OVERSIZE_REJECT;
 
 // Signal handler
 void handle_sigint(int sig __attribute__((unused)))
@@ -147,72 +153,116 @@ static void handle_write(SSL *ssl)
 	size_t len = (size_t)be64toh(be_len);
 	if (len == 0) {
 		printf("Empty write received\n");
+		unsigned char status = 0; // success (no change)
+		(void)ssl_write_all(ssl, &status, 1);
 		return;
 	}
-	if (len > BUFFER_SIZE) {
-		printf("Incoming payload %zu exceeds buffer size %u, truncating\n", len, (unsigned)BUFFER_SIZE);
+	unsigned char status = 0; // 0=success, 1=rejected oversize
+	int oversize = max_buffer_size && len > max_buffer_size;
+	if (oversize) {
+		if (oversize_policy == OVERSIZE_REJECT) {
+			status = 1;
+			printf("Rejected write of %zu bytes (exceeds max %zu)\n", len, max_buffer_size);
+		} else {
+			printf("Dropping write of %zu bytes (exceeds max %zu)\n", len, max_buffer_size);
+		}
+		// Discard incoming payload in chunks to keep stream aligned
+		const size_t CHUNK = 64 * 1024;
+		unsigned char *discard = malloc(CHUNK);
+		if (!discard) { perror("malloc discard"); status = 1; }
+		size_t remaining = len;
+		while (discard && remaining > 0) {
+			size_t want = remaining < CHUNK ? remaining : CHUNK;
+			if (ssl_read_all(ssl, discard, want) < 0) {
+				printf("Failed discarding oversize payload\n");
+				status = 1;
+				break;
+			}
+			remaining -= want;
+		}
+		free(discard);
+		// Send status byte to client
+		(void)ssl_write_all(ssl, &status, 1);
+		return;
 	}
-	size_t to_copy = len > BUFFER_SIZE ? BUFFER_SIZE : len;
 	unsigned char *tmp = malloc(len);
 	if (!tmp) {
 		perror("malloc");
+		status = 1;
+		(void)ssl_write_all(ssl, &status, 1);
 		return;
 	}
 	if (ssl_read_all(ssl, tmp, len) < 0) {
 		printf("Failed to read payload bytes\n");
+		status = 1;
+		(void)ssl_write_all(ssl, &status, 1);
 		free(tmp);
 		return;
 	}
 	pthread_mutex_lock(&buffer_mutex);
-	memcpy(shared_buffer, tmp, to_copy);
-	shared_length = to_copy;
+	if (len > shared_capacity) {
+		char *nbuf = realloc(shared_buffer, len);
+		if (!nbuf) {
+			pthread_mutex_unlock(&buffer_mutex);
+			perror("realloc shared buffer");
+			free(tmp);
+			return;
+		}
+		shared_buffer = nbuf;
+		shared_capacity = len;
+		printf("Resized shared buffer to %zu bytes\n", shared_capacity);
+	}
+	memcpy(shared_buffer, tmp, len);
+	shared_length = len;
 	gen++;
 	pthread_cond_signal(&buffer_cond);
 	pthread_mutex_unlock(&buffer_mutex);
-	printf("Stored %zu bytes (original %zu)\n", to_copy, len);
+	printf("Stored %zu bytes\n", len);
+	// Send success status
+	(void)ssl_write_all(ssl, &status, 1);
 	free(tmp);
 }
 
 static void handle_read(SSL *ssl)
 {
-    pthread_mutex_lock(&buffer_mutex);
-    size_t len = shared_length;
-    uint64_t be_len = htobe64((uint64_t)len);
-    int rc = ssl_write_all(ssl, &be_len, sizeof(be_len));
-    if (rc == 0 && len > 0)
-        rc = ssl_write_all(ssl, shared_buffer, len);
-    pthread_mutex_unlock(&buffer_mutex);
-    if (rc < 0)
-        printf("Failed to send read response\n");
-    else
-        printf("Sent %zu bytes to reader\n", len);
+	pthread_mutex_lock(&buffer_mutex);
+	size_t len = shared_length;
+	uint64_t be_len = htobe64((uint64_t)len);
+	int rc = ssl_write_all(ssl, &be_len, sizeof(be_len));
+	if (rc == 0 && len > 0)
+		rc = ssl_write_all(ssl, shared_buffer, len);
+	pthread_mutex_unlock(&buffer_mutex);
+	if (rc < 0)
+		printf("Failed to send read response\n");
+	else
+		printf("Sent %zu bytes to reader\n", len);
 }
 
 static void handle_read_blocked(SSL *ssl)
 {
-    unsigned int seen = 0;
-    while (!terminate) {
-        pthread_mutex_lock(&buffer_mutex);
-        while (seen == gen && !terminate) {
-            pthread_cond_wait(&buffer_cond, &buffer_mutex);
-        }
-        if (terminate) {
-            pthread_mutex_unlock(&buffer_mutex);
-            break;
-        }
-        seen = gen;
-        size_t len = shared_length;
-        uint64_t be_len = htobe64((uint64_t)len);
-        int rc = ssl_write_all(ssl, &be_len, sizeof(be_len));
-        if (rc == 0 && len > 0)
-            rc = ssl_write_all(ssl, shared_buffer, len);
-        pthread_mutex_unlock(&buffer_mutex);
-        if (rc < 0) {
-            printf("Failed to send blocked update\n");
-            break;
-        }
-        printf("Blocked reader sent %zu bytes\n", len);
-    }
+	unsigned int seen = 0;
+	while (!terminate) {
+		pthread_mutex_lock(&buffer_mutex);
+		while (seen == gen && !terminate) {
+			pthread_cond_wait(&buffer_cond, &buffer_mutex);
+		}
+		if (terminate) {
+			pthread_mutex_unlock(&buffer_mutex);
+			break;
+		}
+		seen = gen;
+		size_t len = shared_length;
+		uint64_t be_len = htobe64((uint64_t)len);
+		int rc = ssl_write_all(ssl, &be_len, sizeof(be_len));
+		if (rc == 0 && len > 0)
+			rc = ssl_write_all(ssl, shared_buffer, len);
+		pthread_mutex_unlock(&buffer_mutex);
+		if (rc < 0) {
+			printf("Failed to send blocked update\n");
+			break;
+		}
+		printf("Blocked reader sent %zu bytes\n", len);
+	}
 }
 
 // Unified client handler that reads command and dispatches
@@ -399,6 +449,8 @@ static void print_usage(const char *prog_name)
 	printf("  -h, --help       Display this help message\n");
 	printf("  -v, --version    Display version information\n");
 	printf("  -d, --daemon     Run in daemon mode (background)\n");
+	printf("  -m, --max-size N[K|M|G]  Set maximum clipboard size (0=unlimited)\n");
+	printf("  -p, --oversize-policy reject|drop  Action on oversize write (default: reject)\n");
 	printf("\nPort:\n");
 	printf("  %d              Server port (all operations)\n", SERVER_PORT);
 	printf("\nProtocol:\n");
@@ -419,15 +471,18 @@ int main(int argc, char *argv[])
 {
 	int opt;
 	int daemon_mode = 0;
+	char *max_size_arg = NULL;
 
 	static struct option long_options[] = {
 		{"help",    no_argument, 0, 'h'},
 		{"version", no_argument, 0, 'v'},
 		{"daemon",  no_argument, 0, 'd'},
+		{"max-size", required_argument, 0, 'm'},
+		{"oversize-policy", required_argument, 0, 'p'},
 		{0, 0, 0, 0}
 	};
 
-	while ((opt = getopt_long(argc, argv, "hvd", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hvdm:p:", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'h':
 			print_usage(argv[0]);
@@ -438,10 +493,55 @@ int main(int argc, char *argv[])
 		case 'd':
 			daemon_mode = 1;
 			break;
+		case 'm':
+			max_size_arg = optarg;
+			break;
+		case 'p':
+			if (strcmp(optarg, "reject") == 0)
+				oversize_policy = OVERSIZE_REJECT;
+			else if (strcmp(optarg, "drop") == 0)
+				oversize_policy = OVERSIZE_DROP;
+			else {
+				fprintf(stderr, "Invalid oversize policy: %s (use reject|drop)\n", optarg);
+				exit(EXIT_FAILURE);
+			}
+			break;
 		default:
 			print_usage(argv[0]);
 			exit(EXIT_FAILURE);
 		}
+	}
+
+	// Parse max size argument if provided
+	if (max_size_arg) {
+		char *end = NULL;
+		unsigned long long v = strtoull(max_size_arg, &end, 10);
+		if (end == max_size_arg) {
+			fprintf(stderr, "Invalid --max-size value: %s\n", max_size_arg);
+			exit(EXIT_FAILURE);
+		}
+		unsigned long long mult = 1ULL;
+		if (*end) {
+			if (end[1] != '\0') {
+				fprintf(stderr, "Invalid --max-size suffix: %s\n", end);
+				exit(EXIT_FAILURE);
+			}
+			switch (*end) {
+			case 'k': case 'K': mult = 1024ULL; break;
+			case 'm': case 'M': mult = 1024ULL * 1024ULL; break;
+			case 'g': case 'G': mult = 1024ULL * 1024ULL * 1024ULL; break;
+			default:
+				fprintf(stderr, "Unknown size suffix '%c' in --max-size\n", *end);
+				exit(EXIT_FAILURE);
+			}
+		}
+		unsigned long long result = v * mult;
+		if (result > SIZE_MAX) {
+			fprintf(stderr, "--max-size value too large: %s\n", max_size_arg);
+			exit(EXIT_FAILURE);
+		}
+		max_buffer_size = (size_t)result;
+		printf("Configured max clipboard size: %zu bytes\n", max_buffer_size);
 	}
 
 	if (daemon_mode) {
@@ -474,6 +574,14 @@ int main(int argc, char *argv[])
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGINT, &sa, NULL);
 
+	// Allocate initial shared buffer
+	shared_capacity = BUFFER_SIZE;
+	shared_buffer = malloc(shared_capacity);
+	if (!shared_buffer) {
+		perror("malloc shared buffer");
+		exit(EXIT_FAILURE);
+	}
+	shared_length = 0;
 	SSL_CTX *ctx = init_ssl_context();
 	struct server_args args = { .port = SERVER_PORT, .ctx = ctx };
 
@@ -487,5 +595,6 @@ int main(int argc, char *argv[])
 	pthread_join(server_thread, NULL);
 
 	SSL_CTX_free(ctx);
+	free(shared_buffer);
 	return 0;
 }
