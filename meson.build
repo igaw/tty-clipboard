@@ -16,5 +16,5 @@ cb_client = executable('tty-cb-client', ['tty-client.c', 'tty-clipboard.c'],
   dependencies: [openssl_dep],
   install : true)
 
-test('tty-cb-server', cb_server)
-test('tty-cb-client', cb_client)
+# Include tests
+subdir('tests')
