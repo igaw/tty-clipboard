@@ -8,13 +8,6 @@ project('tty-clipboard', 'c',
 # Find the OpenSSL package
 openssl_dep = dependency('openssl', required: true)
 
-cb_server = executable('tty-cb-server', ['tty-server.c', 'tty-clipboard.c'],
-  dependencies: [openssl_dep],
-  install : true)
-
-cb_client = executable('tty-cb-client', ['tty-client.c', 'tty-clipboard.c'],
-  dependencies: [openssl_dep],
-  install : true)
-
-# Include tests
+# Include subdirectories
+subdir('src')
 subdir('tests')
