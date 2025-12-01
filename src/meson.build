@@ -3,6 +3,7 @@
 # Generate config header
 config_conf = configuration_data()
 config_conf.set_quoted('VERSION', meson.project_version())
+config_conf.set_quoted('LICENSE', meson.project_license()[0])
 config_h = configure_file(
   output: 'config.h',
   configuration: config_conf

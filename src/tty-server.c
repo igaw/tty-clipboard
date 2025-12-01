@@ -375,7 +375,7 @@ static void print_usage(const char *prog_name)
 static void print_version(void)
 {
 	printf("tty-cb-server version %s\n", VERSION);
-	printf("License: GPL-2.0-only\n");
+	printf("License: %s\n", LICENSE);
 }
 
 int main(int argc, char *argv[])
