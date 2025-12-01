@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2024 Daniel Wagner <wagi@monom.org> */
+
 #ifndef TTY_CLIPBOARD_H_
 #define TTY_CLIPBOARD_H_
 

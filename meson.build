@@ -1,5 +1,6 @@
 project('tty-clipboard', 'c',
   version : '0.1',
+  license : 'GPL-2.0-only',
   default_options : [
     'warning_level=3',
     'c_std=gnu99'])
