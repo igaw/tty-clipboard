@@ -9,11 +9,12 @@
 #include <unistd.h>
 #include <errno.h>
 #include <getopt.h>
-#include <signal.h>
+#include <signal.h>  
 #include <pthread.h>
 #include <arpa/inet.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <sys/select.h>
 
 // Shared buffer and mutex
 char shared_buffer[BUFFER_SIZE];
