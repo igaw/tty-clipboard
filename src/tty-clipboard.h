@@ -9,10 +9,14 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#define READ_PORT 5457
-#define WRITE_PORT 5458
+#define SERVER_PORT 5457
 #define BUFFER_SIZE 4096
-#define READ_BLOCKED_PORT 5459
+
+// Protocol commands
+#define CMD_READ "read"
+#define CMD_WRITE "write"
+#define CMD_READ_BLOCKED "read_blocked"
+#define CMD_MAX_LEN 32
 
 char *create_xdg_config_path(const char *app_name);
 

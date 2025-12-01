@@ -100,9 +100,8 @@ SSL_CTX *init_ssl_context()
 	return ctx;
 }
 
-void *write_handler(void *arg)
+static void handle_write(SSL *ssl)
 {
-	SSL *ssl = (SSL *)arg;
 	char buffer[BUFFER_SIZE];
 
 	printf("%s:%d\n", __func__, __LINE__);
@@ -127,21 +126,11 @@ void *write_handler(void *arg)
 	       bytes_read, buffer);
 
 out:
-	// After finishing reading, initiate a graceful shutdown
-	if (SSL_shutdown(ssl) == 0) {
-		// The first call to SSL_shutdown() sends a close_notify alert to the client
-		if (SSL_shutdown(ssl) == 1) {
-			printf("Connection shutdown successfully.\n");
-		}
-	}
-
-	SSL_free(ssl);
-	pthread_exit(NULL);
+	return;
 }
 
-void *read_handler(void *arg)
+static void handle_read(SSL *ssl)
 {
-	SSL *ssl = (SSL *)arg;
 	char buffer[BUFFER_SIZE];
 
 	// Handle the client's communication
@@ -160,21 +149,10 @@ void *read_handler(void *arg)
 			fprintf(stderr, "SSL_write error: %d\n", ssl_error);
 		}
 	}
-
-	// After finishing reading, initiate a graceful shutdown
-	if (SSL_shutdown(ssl) == 0) {
-		// The first call to SSL_shutdown() sends a close_notify alert to the client
-		if (SSL_shutdown(ssl) == 1) {
-			// success
-		}
-	}
-	SSL_free(ssl);
-	pthread_exit(NULL);
 }
 
-void *read_blocked_handler(void *arg)
+static void handle_read_blocked(SSL *ssl)
 {
-	SSL *ssl = (SSL *)arg;
 	char buffer[BUFFER_SIZE];
 	unsigned int seen = 0;
 
@@ -211,13 +189,49 @@ void *read_blocked_handler(void *arg)
 	}
 
 out:
-	// After finishing reading, initiate a graceful shutdown
+	return;
+}
+
+// Unified client handler that reads command and dispatches
+void *client_handler(void *arg)
+{
+	SSL *ssl = (SSL *)arg;
+	char command[CMD_MAX_LEN];
+
+	// Read the command from client
+	memset(command, 0, CMD_MAX_LEN);
+	int bytes_read = SSL_read(ssl, command, CMD_MAX_LEN - 1);
+	if (bytes_read <= 0) {
+		printf("Failed to read command from client\n");
+		goto cleanup;
+	}
+
+	// Remove trailing newline if present
+	size_t len = strlen(command);
+	if (len > 0 && command[len - 1] == '\n') {
+		command[len - 1] = '\0';
+	}
+
+	printf("Client requested operation: '%s'\n", command);
+
+	// Dispatch to appropriate handler
+	if (strcmp(command, CMD_WRITE) == 0) {
+		handle_write(ssl);
+	} else if (strcmp(command, CMD_READ) == 0) {
+		handle_read(ssl);
+	} else if (strcmp(command, CMD_READ_BLOCKED) == 0) {
+		handle_read_blocked(ssl);
+	} else {
+		printf("Unknown command: '%s'\n", command);
+	}
+
+cleanup:
+	// After finishing, initiate a graceful shutdown
 	if (SSL_shutdown(ssl) == 0) {
 		// The first call to SSL_shutdown() sends a close_notify alert to the client
-		if (SSL_shutdown(ssl) == 1) {
-			// success
-		}
+		SSL_shutdown(ssl);
 	}
+
 	SSL_free(ssl);
 	pthread_exit(NULL);
 }
@@ -225,7 +239,6 @@ out:
 struct server_args {
 	int port;
 	SSL_CTX *ctx;
-	void *(*handler)(void *);
 };
 
 static void *start_server(void *data)
@@ -339,7 +352,7 @@ static void *start_server(void *data)
 
 		// Allocate client handler thread
 		pthread_t client_thread;
-		if (pthread_create(&client_thread, NULL, args->handler,
+		if (pthread_create(&client_thread, NULL, client_handler,
 				   (void *)ssl) != 0) {
 			perror("Failed to create client thread");
 			SSL_free(ssl);
@@ -363,10 +376,11 @@ static void print_usage(const char *prog_name)
 	printf("  -h, --help       Display this help message\n");
 	printf("  -v, --version    Display version information\n");
 	printf("  -d, --daemon     Run in daemon mode (background)\n");
-	printf("\nPorts:\n");
-	printf("  %d              Read port (non-blocking)\n", READ_PORT);
-	printf("  %d              Write port\n", WRITE_PORT);
-	printf("  %d              Read port (blocking/sync)\n", READ_BLOCKED_PORT);
+	printf("\nPort:\n");
+	printf("  %d              Server port (all operations)\n", SERVER_PORT);
+	printf("\nProtocol:\n");
+	printf("  Client connects and sends command: %s, %s, or %s\n",
+	       CMD_READ, CMD_WRITE, CMD_READ_BLOCKED);
 	printf("\nThe server listens on all interfaces (0.0.0.0) by default.\n");
 	printf("Client authentication is required via mutual TLS.\n");
 	printf("\n");
@@ -438,37 +452,16 @@ int main(int argc, char *argv[])
 	sigaction(SIGINT, &sa, NULL);
 
 	SSL_CTX *ctx = init_ssl_context();
-	struct server_args args_read = { .port = READ_PORT,
-					   .ctx = ctx,
-					   .handler = read_handler };
-	struct server_args args_write = { .port = WRITE_PORT,
-					   .ctx = ctx,
-					   .handler = write_handler };
-	struct server_args args_read_blocked = { .port = READ_BLOCKED_PORT,
-						   .ctx = ctx,
-						   .handler = read_blocked_handler };
+	struct server_args args = { .port = SERVER_PORT, .ctx = ctx };
 
-	// Start server on two ports for reading and writing
-	pthread_t read_thread, write_thread, read_blocked_thread;
-	if (pthread_create(&read_thread, NULL, start_server, &args_read) !=
-	    0) {
-		perror("Failed to create reader server thread");
-		exit(EXIT_FAILURE);
-	}
-	if (pthread_create(&write_thread, NULL, start_server, &args_write) !=
-	    0) {
-		perror("Failed to create writer server thread");
-		exit(EXIT_FAILURE);
-	}
-	if (pthread_create(&read_blocked_thread, NULL, start_server,
-			   &args_read_blocked) != 0) {
-		perror("Failed to create blocked reader server thread");
+	// Start server
+	pthread_t server_thread;
+	if (pthread_create(&server_thread, NULL, start_server, &args) != 0) {
+		perror("Failed to create server thread");
 		exit(EXIT_FAILURE);
 	}
 
-	pthread_join(read_thread, NULL);
-	pthread_join(write_thread, NULL);
-	pthread_join(read_blocked_thread, NULL);
+	pthread_join(server_thread, NULL);
 
 	SSL_CTX_free(ctx);
 	return 0;

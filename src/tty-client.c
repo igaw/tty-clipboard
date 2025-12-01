@@ -207,15 +207,18 @@ int main(int argc, char *argv[])
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGINT, &sa, NULL);
 
-	int server_port;
-
-	if (!strcmp(role, "read")) {
+	// Determine command to send
+	const char *command;
+	if (strcmp(role, "read") == 0) {
 		if (sync)
-			server_port = READ_BLOCKED_PORT;
+			command = CMD_READ_BLOCKED;
 		else
-			server_port = READ_PORT;
-	} else
-		server_port = WRITE_PORT;
+			command = CMD_READ;
+	} else {
+		command = CMD_WRITE;
+	}
+
+	int server_port = SERVER_PORT;
 
 	SSL_CTX *ctx = init_ssl_context();
 
@@ -255,6 +258,17 @@ int main(int argc, char *argv[])
 	if (verify_result != X509_V_OK) {
 		fprintf(stderr, "Server certificate verification failed: %ld\n",
 			verify_result);
+		SSL_free(ssl);
+		close(sock);
+		SSL_CTX_free(ctx);
+		exit(EXIT_FAILURE);
+	}
+
+	// Send command to server
+	char cmd_buffer[CMD_MAX_LEN];
+	snprintf(cmd_buffer, CMD_MAX_LEN, "%s\n", command);
+	if (SSL_write(ssl, cmd_buffer, strlen(cmd_buffer)) <= 0) {
+		perror("Failed to send command to server");
 		SSL_free(ssl);
 		close(sock);
 		SSL_CTX_free(ctx);
