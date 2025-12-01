@@ -23,7 +23,7 @@ test('basic-clipboard-test',
     cb_client.full_path(),
     meson.current_build_dir() / 'test-config',
   ],
-  depends: [cert_files],
+  depends: [cert_files, cb_server, cb_client],
   timeout: 30,
   is_parallel: false,
 )
