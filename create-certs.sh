@@ -1,65 +1,71 @@
-#!/bin/bash
-#!/bin/bash
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+set -euo pipefail
 
-# Set directories for generated files
-CERT_DIR="./certs"
-KEY_DIR="./keys"
-mkdir -p $CERT_DIR $KEY_DIR
+# Create certs/keys under XDG config so the binaries can find them.
+CFG_BASE=${XDG_CONFIG_HOME:-"$HOME/.config"}/tty-clipboard
+CERT_DIR="$CFG_BASE/certs"
+KEY_DIR="$CFG_BASE/keys"
+mkdir -p "$CERT_DIR" "$KEY_DIR"
 
-# Fetch passwords from the keyring
-CA_PASSWORD=$(keyring get tty-clipboard ca)
-SERVER_PASSWORD=$(keyring get tty-clipboard server)
-CLIENT_PASSWORD=$(keyring get tty-clipboard client)
+echo "Using config directory: $CFG_BASE"
 
-if [[ -z "$CA_PASSWORD" || -z "$SERVER_PASSWORD" || -z "$CLIENT_PASSWORD" ]]; then
-  echo "One or more passwords are missing from the keyring. Please make sure they are added."
-  exit 1
-fi
+# Subject for generated certs
+SUBJECT="/C=US/ST=California/L=San Francisco/O=tty-clipboard/CN=localhost"
 
-# Set the subject for the certificates
-SUBJECT="/C=US/ST=California/L=San Francisco/O=MyCompany/CN=localhost"
+# Create OpenSSL config for signing (matches tests/setup-test-certs.sh)
+cat > "$CERT_DIR/openssl.cnf" << 'EOF'
+[req]
+distinguished_name = req_distinguished_name
 
-# Generate the CA private key
+[req_distinguished_name]
+
+[v3_ca]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical, keyCertSign, cRLSign
+
+[v3_end]
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+EOF
+
+# Generate the CA private key (no password)
 echo "Generating the Certificate Authority (CA) private key..."
-openssl genpkey -algorithm RSA -out $KEY_DIR/ca.key -aes256 -pass pass:$CA_PASSWORD
+openssl genpkey -algorithm RSA -out "$KEY_DIR/ca.key"
 
 # Generate the CA certificate (self-signed)
 echo "Generating the Certificate Authority (CA) certificate..."
-openssl req -key $KEY_DIR/ca.key -new -x509 -out $CERT_DIR/ca.crt -days 3650 -subj "$SUBJECT" --passin pass:$CA_PASSWORD
+openssl req -key "$KEY_DIR/ca.key" -new -x509 -out "$CERT_DIR/ca.crt" -days 3650 -subj "$SUBJECT" -config "$CERT_DIR/openssl.cnf" -extensions v3_ca
 
-# Generate the server private key
+# Generate the server private key (no password)
 echo "Generating the server private key..."
-openssl genpkey -algorithm RSA -out $KEY_DIR/server.key -pass pass:$SERVER_PASSWORD
+openssl genpkey -algorithm RSA -out "$KEY_DIR/server.key"
 
 # Generate the server certificate signing request (CSR)
 echo "Generating the server CSR..."
-openssl req -key $KEY_DIR/server.key -new -out $CERT_DIR/server.csr -subj "$SUBJECT" -passin pass:$SERVER_PASSWORD
+openssl req -key "$KEY_DIR/server.key" -new -out "$CERT_DIR/server.csr" -subj "$SUBJECT"
 
 # Sign the server certificate with the CA's private key
 echo "Generating the server certificate..."
-openssl x509 -req -in $CERT_DIR/server.csr -CA $CERT_DIR/ca.crt -CAkey $KEY_DIR/ca.key -CAcreateserial -out $CERT_DIR/server.crt -days 365 -sha256 --passin pass:$SERVER_PASSWORD
+openssl x509 -req -in "$CERT_DIR/server.csr" -CA "$CERT_DIR/ca.crt" -CAkey "$KEY_DIR/ca.key" -CAcreateserial -out "$CERT_DIR/server.crt" -days 365 -sha256 -extfile "$CERT_DIR/openssl.cnf" -extensions v3_end
 
-# Generate the client private key
+# Generate the client private key (no password)
 echo "Generating the client private key..."
-openssl genpkey -algorithm RSA -out $KEY_DIR/client.key -pass pass:$CLIENT_PASSWORD
+openssl genpkey -algorithm RSA -out "$KEY_DIR/client.key"
 
 # Generate the client certificate signing request (CSR)
 echo "Generating the client CSR..."
-openssl req -key $KEY_DIR/client.key -new -out $CERT_DIR/client.csr -subj "$SUBJECT" -passin pass:$CLIENT_PASSWORD
+openssl req -key "$KEY_DIR/client.key" -new -out "$CERT_DIR/client.csr" -subj "$SUBJECT"
 
 # Sign the client certificate with the CA's private key
 echo "Generating the client certificate..."
-openssl x509 -req -in $CERT_DIR/client.csr -CA $CERT_DIR/ca.crt -CAkey $KEY_DIR/ca.key -CAcreateserial -out $CERT_DIR/client.crt -days 365 -sha256 --passin pass:$CLIENT_PASSWORD
+openssl x509 -req -in "$CERT_DIR/client.csr" -CA "$CERT_DIR/ca.crt" -CAkey "$KEY_DIR/ca.key" -CAcreateserial -out "$CERT_DIR/client.crt" -days 365 -sha256 -extfile "$CERT_DIR/openssl.cnf" -extensions v3_end
 
-# Clean up CSR files as they are no longer needed
-rm -f $CERT_DIR/server.csr $CERT_DIR/client.csr
+# Clean up CSR and config files as they are no longer needed
+rm -f "$CERT_DIR/server.csr" "$CERT_DIR/client.csr" "$CERT_DIR/openssl.cnf"
 
-# Display the generated certificates and keys
-echo "CA certificate: $CERT_DIR/ca.crt"
-echo "Server certificate: $CERT_DIR/server.crt"
-echo "Server private key: $KEY_DIR/server.key"
-echo "Client certificate: $CERT_DIR/client.crt"
-echo "Client private key: $KEY_DIR/client.key"
-
-# Print a success message
+echo "Certificates created in: $CFG_BASE"
+echo "  CA:       $CERT_DIR/ca.crt (key: $KEY_DIR/ca.key)"
+echo "  Server:   $CERT_DIR/server.crt (key: $KEY_DIR/server.key)"
+echo "  Client:   $CERT_DIR/client.crt (key: $KEY_DIR/client.key)"
 echo "Certificate generation complete!"
