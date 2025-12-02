@@ -81,30 +81,39 @@ SSL_CTX *init_ssl_context()
 	SSL_library_init();
 	OpenSSL_add_all_algorithms();
 	SSL_load_error_strings();
+	LOG_DEBUG("OpenSSL library initialized");
 
 	// Choose the method for SSL/TLS
 	method = TLS_server_method();
 	ctx = SSL_CTX_new(method);
 	if (!ctx) {
+		LOG_ERROR("Unable to create SSL context");
 		perror("Unable to create SSL context");
 		ERR_print_errors_fp(stderr);
 		exit(EXIT_FAILURE);
 	}
+	LOG_DEBUG("SSL context created");
 
 	// Load the server's certificate and private key
+	LOG_DEBUG("Loading server certificate from %s", crt);
 	if (SSL_CTX_use_certificate_file(ctx, crt, SSL_FILETYPE_PEM) <= 0) {
+		LOG_ERROR("Unable to load server certificate from %s", crt);
 		perror("Unable to load certificate");
 		ERR_print_errors_fp(stderr);
 		exit(EXIT_FAILURE);
 	}
+	LOG_DEBUG("Loading server private key from %s", key);
 	if (SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM) <= 0) {
+		LOG_ERROR("Unable to load server private key from %s", key);
 		perror("Unable to load private key");
 		ERR_print_errors_fp(stderr);
 		exit(EXIT_FAILURE);
 	}
 
 	// Load the CA certificate for client verification
+	LOG_DEBUG("Loading CA certificate from %s", ca);
 	if (SSL_CTX_load_verify_locations(ctx, ca, NULL) <= 0) {
+		LOG_ERROR("Unable to load CA certificate from %s", ca);
 		perror("Unable to load CA certificate");
 		ERR_print_errors_fp(stderr);
 		exit(EXIT_FAILURE);
@@ -113,6 +122,7 @@ SSL_CTX *init_ssl_context()
 	// Set the server to verify the client's certificate
 	SSL_CTX_set_verify(
 		ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+	LOG_DEBUG("SSL context configured with certificates");
 
 	return ctx;
 }
@@ -178,7 +188,12 @@ static int handle_write_request(SSL *ssl, Ttycb__WriteRequest *write_req)
 	const unsigned char *data = write_req->data.data;
 	int oversize = (max_buffer_size && len > max_buffer_size);
 
+	LOG_DEBUG("Write request: %zu bytes from client_id %lu", len, write_req->client_id);
+
 	if (oversize) {
+		LOG_WARN("Write request rejected: size %zu exceeds max %zu (policy: %s)",
+			 len, max_buffer_size,
+			 oversize_policy == OVERSIZE_DROP ? "drop" : "reject");
 		int ok = (oversize_policy == OVERSIZE_DROP);
 		Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
 		Ttycb__WriteResponse wr = TTYCB__WRITE_RESPONSE__INIT;
@@ -210,6 +225,8 @@ static int handle_write_request(SSL *ssl, Ttycb__WriteRequest *write_req)
 	pthread_cond_broadcast(&buffer_cond);
 	pthread_mutex_unlock(&buffer_mutex);
 
+	LOG_INFO("Write completed: %zu bytes, message_id: %lu", len, msg_id);
+
 	// Send success response
 	Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
 	Ttycb__WriteResponse wr = TTYCB__WRITE_RESPONSE__INIT;
@@ -222,8 +239,10 @@ static int handle_write_request(SSL *ssl, Ttycb__WriteRequest *write_req)
 
 static int handle_read_request(SSL *ssl)
 {
+	LOG_DEBUG("Read request received");
 	pthread_mutex_lock(&buffer_mutex);
 	size_t len = shared_length;
+	LOG_INFO("Read completed: %zu bytes, message_id: %lu", len, shared_message_id);
 	Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
 	Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
 	df.data.len = len;
@@ -362,12 +381,15 @@ void *client_handler(void *arg)
 		int result = 0;
 		if (env->body_case == TTYCB__ENVELOPE__BODY_WRITE &&
 		    env->write) {
+			LOG_DEBUG("Handling write request from client");
 			result = handle_write_request(ssl, env->write);
 		} else if (env->body_case == TTYCB__ENVELOPE__BODY_READ &&
 			   env->read) {
+			LOG_DEBUG("Handling read request from client");
 			result = handle_read_request(ssl);
 		} else if (env->body_case == TTYCB__ENVELOPE__BODY_SUBSCRIBE &&
 			   env->subscribe) {
+			LOG_DEBUG("Handling subscribe request from client_id: %lu", env->subscribe->client_id);
 			result = handle_subscribe_request(ssl, env->subscribe);
 		}
 
@@ -393,8 +415,10 @@ static int create_server_socket(int port)
 	int server_fd;
 	struct sockaddr_in address;
 
+	LOG_DEBUG("Creating server socket on port %d", port);
 	// Create server socket
 	if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+		LOG_ERROR("Socket creation failed");
 		perror("Socket creation failed");
 		exit(EXIT_FAILURE);
 	}
@@ -453,14 +477,16 @@ static int accept_client_connection(int server_fd)
 	if (!FD_ISSET(server_fd, &readfds))
 		return -2; // No connection ready
 
-	printf("%s:%d fd %d\n", __func__, __LINE__, server_fd);
+	LOG_DEBUG("Connection pending on server socket");
 	if ((client_fd = accept(server_fd, (struct sockaddr *)&address,
 				(socklen_t *)&addrlen)) < 0) {
 		if (errno == EINTR)
 			return -1; // Signal interrupted
+		LOG_ERROR("Accept failed: %s", strerror(errno));
 		perror("accept");
 		return -2; // Error, continue
 	}
+	LOG_INFO("Client connected from %s:%d", inet_ntoa(address.sin_addr), ntohs(address.sin_port));
 	printf("Client connected\n");
 	return client_fd;
 }
@@ -557,7 +583,8 @@ static void print_usage(const char *prog_name)
 	printf("\nA secure clipboard server for TTY environments.\n");
 	printf("\nOptions:\n");
 	printf("  -h, --help       Display this help message\n");
-	printf("  -v, --version    Display version information\n");
+	printf("  -V, --version    Display version information\n");
+	printf("  -v, --verbose    Enable verbose logging (can be repeated for more detail)\n");
 	printf("  -d, --daemon     Run in daemon mode (background)\n");
 	printf("  -m, --max-size N[K|M|G]  Set maximum clipboard size (0=unlimited)\n");
 	printf("  -p, --oversize-policy reject|drop  Action on oversize write (default: reject)\n");
@@ -622,11 +649,13 @@ static void parse_max_size(const char *max_size_arg)
 	}
 	unsigned long long result = v * mult;
 	if (result > SIZE_MAX) {
+		LOG_ERROR("--max-size value too large: %s", max_size_arg);
 		fprintf(stderr, "--max-size value too large: %s\n",
 			max_size_arg);
 		exit(EXIT_FAILURE);
 	}
 	max_buffer_size = (size_t)result;
+	LOG_INFO("Configured max clipboard size: %zu bytes", max_buffer_size);
 	printf("Configured max clipboard size: %zu bytes\n", max_buffer_size);
 }
 
@@ -668,26 +697,31 @@ int main(int argc, char *argv[])
 {
 	int opt;
 	int daemon_mode = 0;
+	int verbose_count = 0;
 	char *max_size_arg = NULL;
 
 	static struct option long_options[] = {
 		{ "help", no_argument, 0, 'h' },
-		{ "version", no_argument, 0, 'v' },
+		{ "version", no_argument, 0, 'V' },
+		{ "verbose", no_argument, 0, 'v' },
 		{ "daemon", no_argument, 0, 'd' },
 		{ "max-size", required_argument, 0, 'm' },
 		{ "oversize-policy", required_argument, 0, 'p' },
 		{ 0, 0, 0, 0 }
 	};
 
-	while ((opt = getopt_long(argc, argv, "hvdm:p:", long_options, NULL)) !=
+	while ((opt = getopt_long(argc, argv, "hvVdm:p:", long_options, NULL)) !=
 	       -1) {
 		switch (opt) {
 		case 'h':
 			print_usage(argv[0]);
 			exit(EXIT_SUCCESS);
-		case 'v':
+		case 'V':
 			print_version();
 			exit(EXIT_SUCCESS);
+		case 'v':
+			verbose_count++;
+			break;
 		case 'd':
 			daemon_mode = 1;
 			break;
@@ -712,27 +746,47 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	// Set log level based on verbose count
+	if (verbose_count == 1) {
+		current_log_level = LOG_LEVEL_INFO;
+	} else if (verbose_count == 2) {
+		current_log_level = LOG_LEVEL_DEBUG;
+	} else if (verbose_count >= 3) {
+		current_log_level = LOG_LEVEL_DEBUG;
+	}
+
+	LOG_INFO("Starting tty-clipboard server version %s", VERSION);
+
 	// Parse max size argument if provided
-	if (max_size_arg)
+	if (max_size_arg) {
+		LOG_DEBUG("Parsing max-size argument: %s", max_size_arg);
 		parse_max_size(max_size_arg);
+	}
 
 	// Daemonize if requested
-	if (daemon_mode)
+	if (daemon_mode) {
+		LOG_INFO("Daemonizing server");
 		daemonize();
+	}
 
 	// Set up signal handling
+	LOG_DEBUG("Setting up signal handlers");
 	setup_signal_handler();
 
 	// Allocate initial shared buffer
+	LOG_DEBUG("Initializing shared buffer");
 	init_shared_buffer();
 
 	// Initialize SSL context
+	LOG_INFO("Initializing SSL context");
 	SSL_CTX *ctx = init_ssl_context();
 	struct server_args args = { .port = SERVER_PORT, .ctx = ctx };
 
 	// Start server thread
+	LOG_INFO("Starting server on port %d", SERVER_PORT);
 	pthread_t server_thread;
 	if (pthread_create(&server_thread, NULL, start_server, &args) != 0) {
+		LOG_ERROR("Failed to create server thread");
 		perror("Failed to create server thread");
 		exit(EXIT_FAILURE);
 	}

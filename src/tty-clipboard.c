@@ -14,6 +14,9 @@
 #define DEFAULT_XDG_CONFIG_HOME ".config"
 #define DEFAULT_XDG_CONFIG_DIRS "/etc/xdg"
 
+// Global log level - default to ERROR only
+log_level_t current_log_level = LOG_LEVEL_ERROR;
+
 // Function to ensure a directory exists
 void ensure_directory_exists(const char *path)
 {

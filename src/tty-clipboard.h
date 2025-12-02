@@ -8,9 +8,48 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <time.h>
 
 #define SERVER_PORT 5457
 #define BUFFER_SIZE 4096
+
+// Logging framework
+typedef enum {
+	LOG_LEVEL_ERROR = 0,
+	LOG_LEVEL_WARN = 1,
+	LOG_LEVEL_INFO = 2,
+	LOG_LEVEL_DEBUG = 3
+} log_level_t;
+
+extern log_level_t current_log_level;
+
+#define LOG_ERROR(...) do { \
+	if (current_log_level >= LOG_LEVEL_ERROR) { \
+		fprintf(stderr, "[ERROR] " __VA_ARGS__); \
+		fprintf(stderr, "\n"); \
+	} \
+} while(0)
+
+#define LOG_WARN(...) do { \
+	if (current_log_level >= LOG_LEVEL_WARN) { \
+		fprintf(stderr, "[WARN] " __VA_ARGS__); \
+		fprintf(stderr, "\n"); \
+	} \
+} while(0)
+
+#define LOG_INFO(...) do { \
+	if (current_log_level >= LOG_LEVEL_INFO) { \
+		fprintf(stdout, "[INFO] " __VA_ARGS__); \
+		fprintf(stdout, "\n"); \
+	} \
+} while(0)
+
+#define LOG_DEBUG(...) do { \
+	if (current_log_level >= LOG_LEVEL_DEBUG) { \
+		fprintf(stdout, "[DEBUG] " __VA_ARGS__); \
+		fprintf(stdout, "\n"); \
+	} \
+} while(0)
 
 // Protocol commands
 #define CMD_READ "read"

@@ -117,30 +117,39 @@ SSL_CTX *init_ssl_context()
 	SSL_library_init();
 	OpenSSL_add_all_algorithms();
 	SSL_load_error_strings();
+	LOG_DEBUG("OpenSSL library initialized");
 
 	// Choose the method for SSL/TLS
 	method = TLS_client_method();
 	ctx = SSL_CTX_new(method);
 	if (!ctx) {
+		LOG_ERROR("Unable to create SSL context");
 		perror("Unable to create SSL context");
 		ERR_print_errors_fp(stderr);
 		exit(EXIT_FAILURE);
 	}
+	LOG_DEBUG("SSL context created");
 
 	// Load the client's certificate and private key
+	LOG_DEBUG("Loading client certificate from %s", crt);
 	if (SSL_CTX_use_certificate_file(ctx, crt, SSL_FILETYPE_PEM) <= 0) {
+		LOG_ERROR("Unable to load client certificate from %s", crt);
 		perror("Unable to load client certificate");
 		ERR_print_errors_fp(stderr);
 		exit(EXIT_FAILURE);
 	}
+	LOG_DEBUG("Loading client private key from %s", key);
 	if (SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM) <= 0) {
+		LOG_ERROR("Unable to load client private key from %s", key);
 		perror("Unable to load client private key");
 		ERR_print_errors_fp(stderr);
 		exit(EXIT_FAILURE);
 	}
 
 	// Load the CA certificate to verify the server's certificate
+	LOG_DEBUG("Loading CA certificate from %s", ca);
 	if (SSL_CTX_load_verify_locations(ctx, ca, NULL) <= 0) {
+		LOG_ERROR("Unable to load CA certificate from %s", ca);
 		perror("Unable to load CA certificate");
 		ERR_print_errors_fp(stderr);
 		exit(EXIT_FAILURE);
@@ -148,6 +157,7 @@ SSL_CTX *init_ssl_context()
 
 	// Enable server certificate verification
 	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+	LOG_DEBUG("SSL context configured with certificates");
 
 	return ctx;
 }
@@ -160,21 +170,28 @@ void handle_error(const char *msg)
 
 static void print_usage(const char *prog_name)
 {
-	printf("Usage: %s [OPTIONS] <read|write> <server_ip>\n", prog_name);
+	printf("Usage: %s [OPTIONS] <command> <server_ip>\n", prog_name);
 	printf("\nA secure clipboard client for TTY environments.\n");
 	printf("\nCommands:\n");
 	printf("  read             Read clipboard content from server\n");
 	printf("  write            Write stdin content to server clipboard\n");
+	printf("  write_read       Write then read from clipboard\n");
 	printf("  read_blocked     Subscribe to clipboard updates (blocking)\n");
+	printf("  write_subscribe  Write then subscribe to updates\n");
 	printf("\nOptions:\n");
 	printf("  -h, --help       Display this help message\n");
-	printf("  -v, --version    Display version information\n");
+	printf("  -V, --version    Display version information\n");
+	printf("  -v, --verbose    Enable verbose logging (repeat for more detail)\n");
 	printf("\nExamples:\n");
-	printf("  %s write 192.168.1.100          # Write stdin to clipboard\n",
+	printf("  %s write 192.168.1.100            # Write stdin to clipboard\n",
 	       prog_name);
-	printf("  %s read 192.168.1.100           # Read clipboard to stdout\n",
+	printf("  %s read 192.168.1.100             # Read clipboard to stdout\n",
 	       prog_name);
-	printf("  %s read_blocked 192.168.1.100   # Subscribe to updates\n",
+	printf("  %s -v write 192.168.1.100         # Write with INFO logging\n",
+	       prog_name);
+	printf("  %s -v -v read 192.168.1.100       # Read with DEBUG logging\n",
+	       prog_name);
+	printf("  %s read_blocked 192.168.1.100     # Subscribe to updates\n",
 	       prog_name);
 	printf("\n");
 }
@@ -209,9 +226,11 @@ static uint64_t generate_client_id(void)
 static SSL *connect_to_server(const char *server_ip, int port, SSL_CTX *ctx,
 			       int *sock_fd)
 {
+	LOG_DEBUG("Creating socket for connection to %s:%d", server_ip, port);
 	// Create socket and connect to server
 	int sock = socket(AF_INET, SOCK_STREAM, 0);
 	if (sock < 0) {
+		LOG_ERROR("Socket creation failed");
 		perror("Socket creation failed");
 		exit(EXIT_FAILURE);
 	}
@@ -225,14 +244,19 @@ static SSL *connect_to_server(const char *server_ip, int port, SSL_CTX *ctx,
 	// Create SSL object and establish SSL connection
 	SSL *ssl = SSL_new(ctx);
 	SSL_set_fd(ssl, sock);
+	LOG_DEBUG("Initiating TCP connection");
 	if (connect(sock, (struct sockaddr *)&server_address,
 		    sizeof(server_address)) < 0) {
+		LOG_ERROR("Connection to server failed");
 		perror("Connection failed");
 		exit(EXIT_FAILURE);
 	}
+	LOG_DEBUG("TCP connection established");
 
 	// Perform SSL handshake
+	LOG_DEBUG("Performing SSL handshake");
 	if (SSL_connect(ssl) <= 0) {
+		LOG_ERROR("SSL handshake failed");
 		perror("SSL connection failed");
 		ERR_print_errors_fp(stderr);
 		SSL_free(ssl);
@@ -241,14 +265,17 @@ static SSL *connect_to_server(const char *server_ip, int port, SSL_CTX *ctx,
 	}
 
 	// Verify the server's certificate
+	LOG_DEBUG("Verifying server certificate");
 	long verify_result = SSL_get_verify_result(ssl);
 	if (verify_result != X509_V_OK) {
+		LOG_ERROR("Server certificate verification failed: %ld", verify_result);
 		fprintf(stderr, "Server certificate verification failed: %ld\n",
 			verify_result);
 		SSL_free(ssl);
 		close(sock);
 		exit(EXIT_FAILURE);
 	}
+	LOG_INFO("SSL connection established successfully");
 
 	*sock_fd = sock;
 	return ssl;
@@ -291,7 +318,9 @@ static void cleanup_and_exit(SSL *ssl, SSL_CTX *ctx, int sock, const char *error
 static void do_write(SSL *ssl, uint64_t client_id, SSL_CTX *ctx, int sock)
 {
 	size_t used;
+	LOG_DEBUG("Reading data from stdin for write operation");
 	uint8_t *buf = read_stdin_to_buffer(&used);
+	LOG_DEBUG("Read %zu bytes from stdin", used);
 
 	Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
 	Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT;
@@ -300,32 +329,39 @@ static void do_write(SSL *ssl, uint64_t client_id, SSL_CTX *ctx, int sock)
 	wr.client_id = client_id;
 	env.write = &wr;
 	env.body_case = TTYCB__ENVELOPE__BODY_WRITE;
+	LOG_DEBUG("Sending write request to server");
 	pb_send_envelope(ssl, &env);
 	free(buf);
 
+	LOG_DEBUG("Waiting for write response");
 	Ttycb__Envelope *resp = pb_recv_envelope(ssl);
 	if (!resp || resp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP ||
 	    !resp->write_resp || !resp->write_resp->ok) {
 		ttycb__envelope__free_unpacked(resp, NULL);
 		cleanup_and_exit(ssl, ctx, sock, "Write failed");
 	}
+	LOG_INFO("Write operation completed, message_id: %lu", resp->write_resp->message_id);
 	ttycb__envelope__free_unpacked(resp, NULL);
 }
 
 static void do_read(SSL *ssl, SSL_CTX *ctx, int sock)
 {
+	LOG_DEBUG("Sending read request to server");
 	Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
 	Ttycb__ReadRequest rd = TTYCB__READ_REQUEST__INIT;
 	env.read = &rd;
 	env.body_case = TTYCB__ENVELOPE__BODY_READ;
 	pb_send_envelope(ssl, &env);
 
+	LOG_DEBUG("Waiting for data frame response");
 	Ttycb__Envelope *resp = pb_recv_envelope(ssl);
 	if (!resp || resp->body_case != TTYCB__ENVELOPE__BODY_DATA ||
 	    !resp->data) {
 		ttycb__envelope__free_unpacked(resp, NULL);
 		cleanup_and_exit(ssl, ctx, sock, "Read failed");
 	}
+	LOG_INFO("Received data frame, size: %zu bytes, message_id: %lu",
+		 resp->data->data.len, resp->data->message_id);
 	fwrite(resp->data->data.data, 1, resp->data->data.len, stdout);
 	fflush(stdout);
 	ttycb__envelope__free_unpacked(resp, NULL);
@@ -333,8 +369,10 @@ static void do_read(SSL *ssl, SSL_CTX *ctx, int sock)
 
 static void do_write_read(SSL *ssl, uint64_t client_id, SSL_CTX *ctx, int sock)
 {
+	LOG_DEBUG("Starting write_read operation");
 	size_t used;
 	uint8_t *buf = read_stdin_to_buffer(&used);
+	LOG_DEBUG("Read %zu bytes from stdin for write_read", used);
 
 	Ttycb__Envelope envw = TTYCB__ENVELOPE__INIT;
 	Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT;
@@ -343,23 +381,28 @@ static void do_write_read(SSL *ssl, uint64_t client_id, SSL_CTX *ctx, int sock)
 	wr.client_id = client_id;
 	envw.write = &wr;
 	envw.body_case = TTYCB__ENVELOPE__BODY_WRITE;
+	LOG_DEBUG("Sending write request");
 	pb_send_envelope(ssl, &envw);
 
+	LOG_DEBUG("Waiting for write response");
 	Ttycb__Envelope *wresp = pb_recv_envelope(ssl);
 	if (!wresp || wresp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP ||
 	    !wresp->write_resp || !wresp->write_resp->ok) {
 		ttycb__envelope__free_unpacked(wresp, NULL);
 		cleanup_and_exit(ssl, ctx, sock, "Write failed");
 	}
+	LOG_INFO("Write completed, message_id: %lu", wresp->write_resp->message_id);
 	ttycb__envelope__free_unpacked(wresp, NULL);
 	free(buf);
 
+	LOG_DEBUG("Sending read request");
 	Ttycb__Envelope envr = TTYCB__ENVELOPE__INIT;
 	Ttycb__ReadRequest rd = TTYCB__READ_REQUEST__INIT;
 	envr.read = &rd;
 	envr.body_case = TTYCB__ENVELOPE__BODY_READ;
 	pb_send_envelope(ssl, &envr);
 
+	LOG_DEBUG("Waiting for data frame");
 	Ttycb__Envelope *rresp = pb_recv_envelope(ssl);
 	if (!rresp || rresp->body_case != TTYCB__ENVELOPE__BODY_DATA ||
 	    !rresp->data) {
@@ -373,33 +416,43 @@ static void do_write_read(SSL *ssl, uint64_t client_id, SSL_CTX *ctx, int sock)
 
 static void do_subscribe(SSL *ssl, uint64_t client_id)
 {
+	LOG_INFO("Starting subscription to clipboard updates");
 	Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
 	Ttycb__SubscribeRequest sub = TTYCB__SUBSCRIBE_REQUEST__INIT;
 	sub.client_id = client_id;
 	env.subscribe = &sub;
 	env.body_case = TTYCB__ENVELOPE__BODY_SUBSCRIBE;
+	LOG_DEBUG("Sending subscribe request");
 	pb_send_envelope(ssl, &env);
 
+	LOG_DEBUG("Entering subscription loop");
 	// Loop receiving data frames until connection closes or terminate signal
 	while (!terminate) {
 		Ttycb__Envelope *resp = pb_recv_envelope(ssl);
-		if (!resp)
+		if (!resp) {
+			LOG_DEBUG("Connection closed by server");
 			break; // connection closed
+		}
 		if (resp->body_case == TTYCB__ENVELOPE__BODY_DATA &&
 		    resp->data) {
+			LOG_DEBUG("Received clipboard update, size: %zu bytes, message_id: %lu",
+				  resp->data->data.len, resp->data->message_id);
 			fwrite(resp->data->data.data, 1,
 			       resp->data->data.len, stdout);
 			fflush(stdout);
 		}
 		ttycb__envelope__free_unpacked(resp, NULL);
 	}
+	LOG_INFO("Subscription ended");
 }
 
 static void do_write_subscribe(SSL *ssl, uint64_t client_id, SSL_CTX *ctx,
 				int sock)
 {
+	LOG_DEBUG("Starting write_subscribe operation");
 	size_t used;
 	uint8_t *buf = read_stdin_to_buffer(&used);
+	LOG_DEBUG("Read %zu bytes from stdin for write_subscribe", used);
 
 	Ttycb__Envelope envw = TTYCB__ENVELOPE__INIT;
 	Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT;
@@ -428,25 +481,40 @@ int main(int argc, char *argv[])
 	const char *role = NULL;
 	const char *server_ip = NULL;
 	int opt;
+	int verbose_count = 0;
 
 	static struct option long_options[] = { { "help", no_argument, 0, 'h' },
 						{ "version", no_argument, 0,
+						  'V' },
+						{ "verbose", no_argument, 0,
 						  'v' },
 						{ 0, 0, 0, 0 } };
 
-	while ((opt = getopt_long(argc, argv, "hv", long_options, NULL)) !=
+	while ((opt = getopt_long(argc, argv, "hvV", long_options, NULL)) !=
 	       -1) {
 		switch (opt) {
 		case 'h':
 			print_usage(argv[0]);
 			exit(EXIT_SUCCESS);
-		case 'v':
+		case 'V':
 			print_version();
 			exit(EXIT_SUCCESS);
+		case 'v':
+			verbose_count++;
+			break;
 		default:
 			print_usage(argv[0]);
 			exit(EXIT_FAILURE);
 		}
+	}
+
+	// Set log level based on verbose count
+	if (verbose_count == 1) {
+		current_log_level = LOG_LEVEL_INFO;
+	} else if (verbose_count == 2) {
+		current_log_level = LOG_LEVEL_DEBUG;
+	} else if (verbose_count >= 3) {
+		current_log_level = LOG_LEVEL_DEBUG;
 	}
 
 	// Parse positional arguments
@@ -475,15 +543,19 @@ int main(int argc, char *argv[])
 
 	// Generate a random non-zero client_id
 	uint64_t client_id = generate_client_id();
+	LOG_DEBUG("Generated client_id: %lu", client_id);
 
 	// Initialize SSL context
+	LOG_INFO("Initializing SSL context");
 	SSL_CTX *ctx = init_ssl_context();
 
 	// Connect to server
+	LOG_INFO("Connecting to server %s:%d", server_ip, SERVER_PORT);
 	int sock;
 	SSL *ssl = connect_to_server(server_ip, SERVER_PORT, ctx, &sock);
 
 	// Execute the requested role
+	LOG_INFO("Executing command: %s", role);
 	if (strcmp(role, "write") == 0) {
 		do_write(ssl, client_id, ctx, sock);
 	} else if (strcmp(role, "read") == 0) {
@@ -495,6 +567,7 @@ int main(int argc, char *argv[])
 	} else if (strcmp(role, "write_subscribe") == 0) {
 		do_write_subscribe(ssl, client_id, ctx, sock);
 	}
+	LOG_INFO("Command completed successfully");
 
 	// Initiate graceful shutdown after all data is sent
 	if (SSL_shutdown(ssl) == 0) {
