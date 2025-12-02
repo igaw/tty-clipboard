@@ -6,6 +6,11 @@ config_conf.set_quoted('VERSION', meson.project_version())
 config_conf.set_quoted('LICENSE', meson.project_license()[0])
 # Expose protobuf enable as integer define in config.h
 config_conf.set10('HAVE_PROTOBUF', with_protobuf)
+
+# Define feature test macros for POSIX and GNU extensions
+# _GNU_SOURCE provides: asprintf, be64toh, htobe64, sigaction, etc.
+config_conf.set('_GNU_SOURCE', '1', description: 'Enable GNU extensions including POSIX features')
+
 config_h = configure_file(
   output: 'config.h',
   configuration: config_conf

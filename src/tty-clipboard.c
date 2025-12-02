@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* Copyright (C) 2024 Daniel Wagner <wagi@monom.org> */
 
+#include "config.h"
 #include "tty-clipboard.h"
 
 #include <stdio.h>
