@@ -22,23 +22,18 @@ if cflags != ''
   cmake_cflags_arg = ' -DCMAKE_C_FLAGS="' + cflags + '"'
 endif
 
-# Configure and build mbedTLS using cmake directly
+# Configure and build mbedTLS using cmake directly (matching Fedora's approach)
 # 1) Initialize submodules in the source dir (no-op if already present)
-# 2) Enable PSA Crypto and TLS 1.3 using mbedTLS's config script (matching Fedora configuration)
-# 3) Configure inside the subproject build dir (cmake-build)
-# 4) Build static libs and copy them next to this meson subproject build dir
+# 2) Configure with CMake (adapted from Fedora's build flags for static libs)
+# 3) Build static libs and copy them next to this meson subproject build dir
 mbedtls_build = custom_target('mbedtls-configure',
   output: ['libmbedtls.a', 'libmbedx509.a', 'libmbedcrypto.a'],
   command: [
     'sh', '-c',
     ('src="@0@"; bld="@1@"; '
      + '(cd "$src" && git submodule update --init 2>/dev/null || true) && '
-     + 'cd "$src" && python3 scripts/config.py set MBEDTLS_PSA_CRYPTO_CONFIG && '
-     + 'python3 scripts/config.py set MBEDTLS_USE_PSA_CRYPTO && '
-     + 'python3 scripts/config.py set MBEDTLS_PSA_CRYPTO_C && '
-     + 'python3 scripts/config.py set MBEDTLS_SSL_PROTO_TLS1_3 && '
      + 'mkdir -p "$bld/cmake-build" && cd "$bld/cmake-build" && '
-    + 'cmake "$src" -DCMAKE_BUILD_TYPE=Release -DENABLE_PROGRAMS=OFF -DENABLE_TESTING=OFF -DUSE_SHARED_LIBS=OFF -DMBEDTLS_FATAL_WARNINGS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON@2@ && '
+    + 'cmake "$src" -DCMAKE_BUILD_TYPE=Release -DLINK_WITH_PTHREAD=ON -DINSTALL_MBEDTLS_HEADERS=ON -DENABLE_PROGRAMS=OFF -DUSE_SHARED_MBEDTLS_LIBRARY=OFF -DUSE_STATIC_MBEDTLS_LIBRARY=ON -DGEN_FILES=OFF -DMBEDTLS_FATAL_WARNINGS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON@2@ && '
      + 'make -j"$(nproc)" mbedtls mbedx509 mbedcrypto && '
      + 'cp library/libmbedtls.a library/libmbedx509.a library/libmbedcrypto.a "$bld"')
     .format(source_root, build_root, cmake_cflags_arg)
