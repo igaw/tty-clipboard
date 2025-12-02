@@ -28,7 +28,7 @@
 static void tls_debug(void *ctx, int level, const char *file, int line, const char *msg)
 {
 	(void)ctx;
-	fprintf(stderr, "mbedtls[%d] %s:%d: %s\n", level, file, line, msg);
+	fprintf(stderr, "mbedtls[%d] %s:%d: %s", level, file, line, msg);
 }
 
 
@@ -248,6 +248,16 @@ ssl_context_t *init_ssl_context()
 
 	// Set RNG and I/O callbacks
 	mbedtls_ssl_conf_rng(&ssl_ctx->conf, mbedtls_ctr_drbg_random, &ssl_ctx->ctr_drbg);
+
+	// Prefer TLS 1.3 when available; keep TLS 1.2 as minimum for compatibility
+#ifdef MBEDTLS_3X
+	mbedtls_ssl_conf_min_tls_version(&ssl_ctx->conf, MBEDTLS_SSL_VERSION_TLS1_2);
+	mbedtls_ssl_conf_max_tls_version(&ssl_ctx->conf, MBEDTLS_SSL_VERSION_TLS1_3);
+#else
+	// mbedTLS 2.x supports up to TLS 1.2 only
+	mbedtls_ssl_conf_min_version(&ssl_ctx->conf, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3); // TLS 1.2
+	mbedtls_ssl_conf_max_version(&ssl_ctx->conf, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3);
+#endif
 
 	// Optional debug: enable detailed mbedTLS logging when MBEDTLS_DEBUG env var is set
 	const char *dbg = getenv("MBEDTLS_DEBUG");

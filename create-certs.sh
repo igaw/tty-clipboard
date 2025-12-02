@@ -29,17 +29,17 @@ basicConstraints = CA:FALSE
 keyUsage = digitalSignature, keyEncipherment
 EOF
 
-# Generate the CA private key (no password)
-echo "Generating the Certificate Authority (CA) private key..."
-openssl genpkey -algorithm RSA -out "$KEY_DIR/ca.key"
+# Generate the CA private key (EC P-256)
+echo "Generating the Certificate Authority (CA) private key (EC P-256)..."
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -out "$KEY_DIR/ca.key"
 
 # Generate the CA certificate (self-signed)
 echo "Generating the Certificate Authority (CA) certificate..."
 openssl req -key "$KEY_DIR/ca.key" -new -x509 -out "$CERT_DIR/ca.crt" -days 3650 -subj "$SUBJECT" -config "$CERT_DIR/openssl.cnf" -extensions v3_ca
 
-# Generate the server private key (no password)
-echo "Generating the server private key..."
-openssl genpkey -algorithm RSA -out "$KEY_DIR/server.key"
+# Generate the server private key (EC P-256)
+echo "Generating the server private key (EC P-256)..."
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -out "$KEY_DIR/server.key"
 
 # Generate the server certificate signing request (CSR)
 echo "Generating the server CSR..."
@@ -49,9 +49,9 @@ openssl req -key "$KEY_DIR/server.key" -new -out "$CERT_DIR/server.csr" -subj "$
 echo "Generating the server certificate..."
 openssl x509 -req -in "$CERT_DIR/server.csr" -CA "$CERT_DIR/ca.crt" -CAkey "$KEY_DIR/ca.key" -CAcreateserial -out "$CERT_DIR/server.crt" -days 365 -sha256 -extfile "$CERT_DIR/openssl.cnf" -extensions v3_end
 
-# Generate the client private key (no password)
-echo "Generating the client private key..."
-openssl genpkey -algorithm RSA -out "$KEY_DIR/client.key"
+# Generate the client private key (EC P-256)
+echo "Generating the client private key (EC P-256)..."
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -out "$KEY_DIR/client.key"
 
 # Generate the client certificate signing request (CSR)
 echo "Generating the client CSR..."
