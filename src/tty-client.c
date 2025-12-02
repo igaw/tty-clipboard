@@ -265,15 +265,14 @@ ssl_context_t *init_ssl_context()
 	}
 
 #ifdef MBEDTLS_3X
-	// mbedTLS 3.x requires setting hostname for certificate verification
-	// Use "localhost" as a generic name since we're using IP addresses
+	// mbedTLS 3.x requires setting hostname, matching the CN in our certificates
 	ret = mbedtls_ssl_set_hostname(&ssl_ctx->ssl, "tty-clipboard-server");
 	if (ret != 0) {
 		LOG_ERROR("mbedtls_ssl_set_hostname failed: -0x%04x", -ret);
 		fprintf(stderr, "mbedtls_ssl_set_hostname failed: -0x%04x\n", -ret);
 		exit(EXIT_FAILURE);
 	}
-	LOG_DEBUG("Hostname set for certificate verification");
+	LOG_DEBUG("Hostname set to 'tty-clipboard-server' for certificate verification");
 #endif
 
 	return ssl_ctx;

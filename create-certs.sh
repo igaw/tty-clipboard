@@ -11,7 +11,7 @@ mkdir -p "$CERT_DIR" "$KEY_DIR"
 echo "Using config directory: $CFG_BASE"
 
 # Subject for generated certs
-SUBJECT="/C=US/ST=California/L=San Francisco/O=tty-clipboard/CN=localhost"
+SUBJECT="/C=US/ST=California/L=San Francisco/O=tty-clipboard/CN=tty-clipboard-server"
 
 # Create OpenSSL config for signing (matches tests/setup-test-certs.sh)
 cat > "$CERT_DIR/openssl.cnf" << 'EOF'

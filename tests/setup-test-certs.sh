@@ -12,7 +12,7 @@ OUTPUT_DIR="$2"
 mkdir -p "$CERT_DIR" "$KEY_DIR"
 
 # Set the subject for the certificates
-SUBJECT="/C=US/ST=California/L=San Francisco/O=TestCompany/CN=localhost"
+SUBJECT="/C=US/ST=California/L=San Francisco/O=TestCompany/CN=tty-clipboard-server"
 
 # Create OpenSSL config for signing
 cat > "$CERT_DIR/openssl.cnf" << 'EOF'
