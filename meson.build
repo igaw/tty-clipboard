@@ -9,12 +9,20 @@ project('tty-clipboard', 'c',
 # Try system libraries first, fall back to subprojects if static build is requested or system libs not found
 if get_option('static')
   message('Static build requested, using subprojects')
+  
+  # Check for build tools required by subprojects
+  cmake = find_program('cmake', required: false)
+  autoreconf = find_program('autoreconf', required: false)
+  
   mbedtls_dep = dependency('mbedtls', required: false, static: true)
   mbedx509_dep = dependency('mbedx509', required: false, static: true)
   mbedcrypto_dep = dependency('mbedcrypto', required: false, static: true)
   
   if not mbedtls_dep.found() or not mbedx509_dep.found() or not mbedcrypto_dep.found()
     message('Static libraries not found, falling back to mbedtls subproject')
+    if not cmake.found()
+      error('cmake is required to build mbedtls subproject. Please install cmake.')
+    endif
     mbedtls_proj = subproject('mbedtls')
     mbedtls_dep = mbedtls_proj.get_variable('mbedtls_dep')
     mbedx509_dep = mbedtls_proj.get_variable('mbedx509_dep')
@@ -27,6 +35,9 @@ else
   
   if not mbedtls_dep.found() or not mbedx509_dep.found() or not mbedcrypto_dep.found()
     message('System mbedtls not found, falling back to subproject')
+    cmake = find_program('cmake', required: true, 
+      disabler: true,
+      native: true)
     mbedtls_proj = subproject('mbedtls')
     mbedtls_dep = mbedtls_proj.get_variable('mbedtls_dep')
     mbedx509_dep = mbedtls_proj.get_variable('mbedx509_dep')
@@ -43,6 +54,9 @@ if get_option('static')
 
   if not protobuf_dep.found()
     message('System static libprotobuf-c not found, using subproject')
+    if not autoreconf.found()
+      error('autoreconf is required to build libprotobuf-c subproject. Please install autoconf, automake, and libtool.')
+    endif
     pb_sub = subproject('libprotobuf-c')
     protobuf_dep = pb_sub.get_variable('protobuf_c_dep')
     protoc_depends = [pb_sub.get_variable('protobufc_build')]
@@ -58,6 +72,9 @@ else
 
   if not protobuf_dep.found()
     message('System libprotobuf-c not found, using subproject')
+    autoreconf = find_program('autoreconf', required: true,
+      disabler: true,
+      native: true)
     pb_sub = subproject('libprotobuf-c')
     protobuf_dep = pb_sub.get_variable('protobuf_c_dep')
     protoc_depends = [pb_sub.get_variable('protobufc_build')]
