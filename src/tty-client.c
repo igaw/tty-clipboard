@@ -279,6 +279,15 @@ static uint8_t *read_stdin_to_buffer(size_t *out_size)
 	return buf;
 }
 
+static void cleanup_and_exit(SSL *ssl, SSL_CTX *ctx, int sock, const char *error_msg)
+{
+	fprintf(stderr, "%s\n", error_msg);
+	SSL_free(ssl);
+	close(sock);
+	SSL_CTX_free(ctx);
+	exit(EXIT_FAILURE);
+}
+
 static void do_write(SSL *ssl, uint64_t client_id, SSL_CTX *ctx, int sock)
 {
 	size_t used;
@@ -298,11 +307,7 @@ static void do_write(SSL *ssl, uint64_t client_id, SSL_CTX *ctx, int sock)
 	if (!resp || resp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP ||
 	    !resp->write_resp || !resp->write_resp->ok) {
 		ttycb__envelope__free_unpacked(resp, NULL);
-		fprintf(stderr, "Write failed\n");
-		SSL_free(ssl);
-		close(sock);
-		SSL_CTX_free(ctx);
-		exit(EXIT_FAILURE);
+		cleanup_and_exit(ssl, ctx, sock, "Write failed");
 	}
 	ttycb__envelope__free_unpacked(resp, NULL);
 }
@@ -319,11 +324,7 @@ static void do_read(SSL *ssl, SSL_CTX *ctx, int sock)
 	if (!resp || resp->body_case != TTYCB__ENVELOPE__BODY_DATA ||
 	    !resp->data) {
 		ttycb__envelope__free_unpacked(resp, NULL);
-		fprintf(stderr, "Read failed\n");
-		SSL_free(ssl);
-		close(sock);
-		SSL_CTX_free(ctx);
-		exit(EXIT_FAILURE);
+		cleanup_and_exit(ssl, ctx, sock, "Read failed");
 	}
 	fwrite(resp->data->data.data, 1, resp->data->data.len, stdout);
 	fflush(stdout);
@@ -348,11 +349,7 @@ static void do_write_read(SSL *ssl, uint64_t client_id, SSL_CTX *ctx, int sock)
 	if (!wresp || wresp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP ||
 	    !wresp->write_resp || !wresp->write_resp->ok) {
 		ttycb__envelope__free_unpacked(wresp, NULL);
-		fprintf(stderr, "Write failed\n");
-		SSL_free(ssl);
-		close(sock);
-		SSL_CTX_free(ctx);
-		exit(EXIT_FAILURE);
+		cleanup_and_exit(ssl, ctx, sock, "Write failed");
 	}
 	ttycb__envelope__free_unpacked(wresp, NULL);
 	free(buf);
@@ -367,11 +364,7 @@ static void do_write_read(SSL *ssl, uint64_t client_id, SSL_CTX *ctx, int sock)
 	if (!rresp || rresp->body_case != TTYCB__ENVELOPE__BODY_DATA ||
 	    !rresp->data) {
 		ttycb__envelope__free_unpacked(rresp, NULL);
-		fprintf(stderr, "Read failed\n");
-		SSL_free(ssl);
-		close(sock);
-		SSL_CTX_free(ctx);
-		exit(EXIT_FAILURE);
+		cleanup_and_exit(ssl, ctx, sock, "Read failed");
 	}
 	fwrite(rresp->data->data.data, 1, rresp->data->data.len, stdout);
 	fflush(stdout);
@@ -421,11 +414,7 @@ static void do_write_subscribe(SSL *ssl, uint64_t client_id, SSL_CTX *ctx,
 	if (!wresp || wresp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP ||
 	    !wresp->write_resp || !wresp->write_resp->ok) {
 		ttycb__envelope__free_unpacked(wresp, NULL);
-		fprintf(stderr, "Write failed\n");
-		SSL_free(ssl);
-		close(sock);
-		SSL_CTX_free(ctx);
-		exit(EXIT_FAILURE);
+		cleanup_and_exit(ssl, ctx, sock, "Write failed");
 	}
 	ttycb__envelope__free_unpacked(wresp, NULL);
 	free(buf);
