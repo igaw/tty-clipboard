@@ -1,0 +1,35 @@
+syntax = "proto3";
+package ttycb;
+
+message WriteRequest {
+  bytes data = 1;
+}
+
+message ReadRequest {}
+
+message SubscribeRequest {}
+
+message WriteResponse {
+  bool ok = 1;
+  string message = 2;
+}
+
+message DataFrame {
+  bytes data = 1;
+}
+
+message Error {
+  int32 code = 1;
+  string message = 2;
+}
+
+message Envelope {
+  oneof body {
+    WriteRequest write = 1;
+    ReadRequest read = 2;
+    SubscribeRequest subscribe = 3;
+    WriteResponse write_resp = 4;
+    DataFrame data = 5;
+    Error error = 6;
+  }
+}

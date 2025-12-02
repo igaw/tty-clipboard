@@ -3,7 +3,7 @@
 ## tty-cb-client
 
 ```bash
-Usage: tty-cb-client [OPTIONS] <read|write> <server_ip>
+Usage: tty-cb-client [OPTIONS] <read|write[|write_read]> <server_ip>
 
 A secure clipboard client for TTY environments.
 
@@ -15,11 +15,13 @@ Options:
   -s, --sync       Use synchronous/blocking read mode
   -h, --help       Display this help message
   -v, --version    Display version information
+  --protobuf       Use protobuf-c bidirectional protocol (enables write_read)
 
 Examples:
   tty-cb-client write 192.168.1.100          # Write stdin to clipboard
   tty-cb-client read 192.168.1.100           # Read clipboard to stdout
   tty-cb-client read 192.168.1.100 --sync    # Read with sync mode
+  tty-cb-client --protobuf write_read 192.168.1.100 < data.bin  # Write then read back over one connection
 ```
 
 ## tty-cb-server
@@ -37,6 +39,7 @@ Options:
   -p, --oversize-policy MODE     Action when write exceeds max-size:
                                  reject (close connection, client fails)
                                  drop   (discard payload, client succeeds)
+  --protobuf                     Enable protobuf-c bidirectional protocol mode
 
 Port:
   5457                          Single port for all operations

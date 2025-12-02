@@ -18,6 +18,10 @@
 #include <sys/select.h>
 #include <stdint.h>
 #include <endian.h>
+#if HAVE_PROTOBUF
+#include <protobuf-c/protobuf-c.h>
+#include "clipboard.pb-c.h"
+#endif
 
 // Shared buffer and mutex (dynamic)
 char *shared_buffer = NULL;
@@ -32,6 +36,9 @@ static size_t max_buffer_size = 0;
 // Oversize policy: reject (close connection) or drop (discard payload)
 typedef enum { OVERSIZE_REJECT = 0, OVERSIZE_DROP = 1 } oversize_policy_t;
 static oversize_policy_t oversize_policy = OVERSIZE_REJECT;
+#if HAVE_PROTOBUF
+static int g_use_protobuf = 0;
+#endif
 
 // Signal handler
 void handle_sigint(int sig __attribute__((unused)))
@@ -269,6 +276,13 @@ static void handle_read_blocked(SSL *ssl)
 void *client_handler(void *arg)
 {
 	SSL *ssl = (SSL *)arg;
+#if HAVE_PROTOBUF
+	if (g_use_protobuf) {
+		// Protobuf mode handler
+		// Forward-declare
+		goto proto_mode;
+	}
+#endif
 	char command[CMD_MAX_LEN];
 
 	// Read the command from client
@@ -307,11 +321,118 @@ cleanup:
 
 	SSL_free(ssl);
 	pthread_exit(NULL);
+
+#if HAVE_PROTOBUF
+proto_mode: ;
+	// Protobuf envelope helpers
+	while (!terminate) {
+		// Read envelope frame
+		uint64_t be_len = 0;
+		int rr = SSL_read(ssl, &be_len, sizeof(be_len));
+		if (rr <= 0) break;
+		size_t mlen = (size_t)be64toh(be_len);
+		if (mlen == 0) continue;
+		unsigned char *mbuf = malloc(mlen);
+		if (!mbuf) break;
+		if (ssl_read_all(ssl, mbuf, mlen) < 0) { free(mbuf); break; }
+		Ttycb__Envelope *env = ttycb__envelope__unpack(NULL, mlen, mbuf);
+		free(mbuf);
+		if (!env) { printf("Failed to unpack envelope\n"); break; }
+
+		// Handle message types
+		if (env->body_case == TTYCB__ENVELOPE__BODY_WRITE && env->write) {
+			size_t len = env->write->data.len;
+			const unsigned char *data = env->write->data.data;
+			int oversize = (max_buffer_size && len > max_buffer_size);
+			if (oversize) {
+				int ok = (oversize_policy == OVERSIZE_DROP);
+				// Update nothing
+				Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
+				Ttycb__WriteResponse wr = TTYCB__WRITE_RESPONSE__INIT;
+			wr.ok = ok;
+			if (!ok) wr.message = (char*)"oversize";
+			resp.write_resp = &wr; resp.body_case = TTYCB__ENVELOPE__BODY_WRITE_RESP;
+			size_t outsz = ttycb__envelope__get_packed_size(&resp);
+			unsigned char *outbuf = malloc(outsz);
+			if (!outbuf) { ttycb__envelope__free_unpacked(env, NULL); break; }
+			ttycb__envelope__pack(&resp, outbuf);
+			uint64_t pfx = htobe64((uint64_t)outsz);
+			if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 || ssl_write_all(ssl, outbuf, outsz) < 0) { free(outbuf); ttycb__envelope__free_unpacked(env, NULL); break; }
+			free(outbuf);
+			ttycb__envelope__free_unpacked(env, NULL);
+				continue;
+			}
+			// store
+			pthread_mutex_lock(&buffer_mutex);
+			if (len > shared_capacity) {
+				char *nbuf = realloc(shared_buffer, len);
+				if (!nbuf) { pthread_mutex_unlock(&buffer_mutex); ttycb__envelope__free_unpacked(env, NULL); break; }
+				shared_buffer = nbuf; shared_capacity = len;
+			}
+			memcpy(shared_buffer, data, len);
+		shared_length = len; gen++; pthread_cond_signal(&buffer_cond);
+		pthread_mutex_unlock(&buffer_mutex);
+		// reply ok
+		Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
+		Ttycb__WriteResponse wr = TTYCB__WRITE_RESPONSE__INIT;
+		wr.ok = 1; resp.write_resp = &wr; resp.body_case = TTYCB__ENVELOPE__BODY_WRITE_RESP;
+		size_t outsz = ttycb__envelope__get_packed_size(&resp);
+		unsigned char *outbuf = malloc(outsz);
+		if (!outbuf) { ttycb__envelope__free_unpacked(env, NULL); break; }
+		ttycb__envelope__pack(&resp, outbuf);
+		uint64_t pfx = htobe64((uint64_t)outsz);
+		if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 || ssl_write_all(ssl, outbuf, outsz) < 0) { free(outbuf); ttycb__envelope__free_unpacked(env, NULL); break; }
+		free(outbuf);
+	} else if (env->body_case == TTYCB__ENVELOPE__BODY_READ && env->read) {
+		pthread_mutex_lock(&buffer_mutex);
+		size_t len = shared_length;
+		Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
+		Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
+		df.data.len = len; df.data.data = (uint8_t*)shared_buffer;
+		resp.data = &df; resp.body_case = TTYCB__ENVELOPE__BODY_DATA;
+		size_t outsz = ttycb__envelope__get_packed_size(&resp);
+		unsigned char *outbuf = malloc(outsz);
+		if (!outbuf) { pthread_mutex_unlock(&buffer_mutex); ttycb__envelope__free_unpacked(env, NULL); break; }
+		ttycb__envelope__pack(&resp, outbuf);
+		pthread_mutex_unlock(&buffer_mutex);
+		uint64_t pfx = htobe64((uint64_t)outsz);
+		if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 || ssl_write_all(ssl, outbuf, outsz) < 0) { free(outbuf); ttycb__envelope__free_unpacked(env, NULL); break; }
+		free(outbuf);
+	} else if (env->body_case == TTYCB__ENVELOPE__BODY_SUBSCRIBE && env->subscribe) {
+			unsigned int seen = 0;
+			while (!terminate) {
+				pthread_mutex_lock(&buffer_mutex);
+				while (seen == gen && !terminate) pthread_cond_wait(&buffer_cond, &buffer_mutex);
+			if (terminate) { pthread_mutex_unlock(&buffer_mutex); break; }
+			seen = gen; size_t len = shared_length;
+			Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
+			Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
+			df.data.len = len; df.data.data = (uint8_t*)shared_buffer;
+			resp.data = &df; resp.body_case = TTYCB__ENVELOPE__BODY_DATA;
+			size_t outsz = ttycb__envelope__get_packed_size(&resp);
+			unsigned char *outbuf = malloc(outsz);
+			if (!outbuf) { pthread_mutex_unlock(&buffer_mutex); break; }
+			ttycb__envelope__pack(&resp, outbuf);
+			pthread_mutex_unlock(&buffer_mutex);
+			uint64_t pfx = htobe64((uint64_t)outsz);
+			if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 || ssl_write_all(ssl, outbuf, outsz) < 0) { free(outbuf); break; }
+			free(outbuf);
+			}
+		} else {
+			// Unknown: ignore
+		}
+		ttycb__envelope__free_unpacked(env, NULL);
+	}
+	if (SSL_shutdown(ssl) == 0) SSL_shutdown(ssl);
+	SSL_free(ssl);
+	pthread_exit(NULL);
+#endif
 }
 
 struct server_args {
 	int port;
 	SSL_CTX *ctx;
+	int use_protobuf;
 };
 
 static void *start_server(void *data)
@@ -425,8 +546,14 @@ static void *start_server(void *data)
 
 		// Allocate client handler thread
 		pthread_t client_thread;
-		if (pthread_create(&client_thread, NULL, client_handler,
-				   (void *)ssl) != 0) {
+		void *(*handler_fn)(void *) = client_handler;
+#if HAVE_PROTOBUF
+		if (args->use_protobuf) {
+			// wrap SSL pointer into a tiny struct if needed; reuse same signature
+			handler_fn = client_handler; // default to ASCII; will branch inside
+		}
+#endif
+		if (pthread_create(&client_thread, NULL, handler_fn, (void *)ssl) != 0) {
 			perror("Failed to create client thread");
 			SSL_free(ssl);
 			close(client_fd);
@@ -451,6 +578,9 @@ static void print_usage(const char *prog_name)
 	printf("  -d, --daemon     Run in daemon mode (background)\n");
 	printf("  -m, --max-size N[K|M|G]  Set maximum clipboard size (0=unlimited)\n");
 	printf("  -p, --oversize-policy reject|drop  Action on oversize write (default: reject)\n");
+#if HAVE_PROTOBUF
+	printf("  --protobuf            Enable protobuf-c bidirectional protocol mode\n");
+#endif
 	printf("\nPort:\n");
 	printf("  %d              Server port (all operations)\n", SERVER_PORT);
 	printf("\nProtocol:\n");
@@ -472,6 +602,7 @@ int main(int argc, char *argv[])
 	int opt;
 	int daemon_mode = 0;
 	char *max_size_arg = NULL;
+	int use_protobuf = 0;
 
 	static struct option long_options[] = {
 		{"help",    no_argument, 0, 'h'},
@@ -479,6 +610,9 @@ int main(int argc, char *argv[])
 		{"daemon",  no_argument, 0, 'd'},
 		{"max-size", required_argument, 0, 'm'},
 		{"oversize-policy", required_argument, 0, 'p'},
+#if HAVE_PROTOBUF
+		{"protobuf", no_argument, 0, 1000},
+#endif
 		{0, 0, 0, 0}
 	};
 
@@ -505,6 +639,9 @@ int main(int argc, char *argv[])
 				fprintf(stderr, "Invalid oversize policy: %s (use reject|drop)\n", optarg);
 				exit(EXIT_FAILURE);
 			}
+			break;
+		case 1000: // --protobuf
+			use_protobuf = 1;
 			break;
 		default:
 			print_usage(argv[0]);
@@ -583,7 +720,15 @@ int main(int argc, char *argv[])
 	}
 	shared_length = 0;
 	SSL_CTX *ctx = init_ssl_context();
-	struct server_args args = { .port = SERVER_PORT, .ctx = ctx };
+	struct server_args args = { .port = SERVER_PORT, .ctx = ctx, .use_protobuf = use_protobuf };
+#if HAVE_PROTOBUF
+	g_use_protobuf = use_protobuf;
+#else
+	if (use_protobuf) {
+		fprintf(stderr, "protobuf mode requested but not built with protobuf-c support. Reconfigure with -Dwith_protobuf=true\n");
+		exit(EXIT_FAILURE);
+	}
+#endif
 
 	// Start server
 	pthread_t server_thread;

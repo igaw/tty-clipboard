@@ -1,0 +1,1 @@
+option('with_protobuf', type: 'boolean', value: true, description: 'Enable protobuf-c based protocol')

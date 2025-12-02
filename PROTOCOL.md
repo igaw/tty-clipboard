@@ -23,9 +23,6 @@ This document describes the on-the-wire framing between `tty-cb-client` and `tty
 | `read_blocked` | C → S     | Stream updates whenever clipboard changes|
 
 Maximum command length accepted: `CMD_MAX_LEN` (currently 32 bytes). Unknown commands are ignored and connection closed.
-
-## Primitive Types
-- **Length Prefix:** 8 bytes, unsigned, big-endian (`uint64_t`). Denotes payload size that immediately follows.
 - **Status Byte (Write Acknowledgement):** 1 byte following a write payload:
   - `0x00`: Success (clipboard updated)
   - `0x01`: Failure (oversize rejection, memory allocation error, or discard policy triggered)

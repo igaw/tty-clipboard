@@ -17,6 +17,33 @@
 #include <stdint.h>
 #include <endian.h>
 
+// Forward declaration to avoid implicit declaration warnings
+void handle_error(const char *msg);
+
+#if HAVE_PROTOBUF
+#include <protobuf-c/protobuf-c.h>
+#include "clipboard.pb-c.h"
+
+static void pb_send_envelope(SSL *ssl, Ttycb__Envelope *env)
+{
+	uint8_t *buf = NULL; size_t sz = ttycb__envelope__get_packed_size(env);
+	buf = malloc(sz); if (!buf) handle_error("malloc");
+	ttycb__envelope__pack(env, buf);
+	uint64_t pfx = htobe64((uint64_t)sz);
+	if (SSL_write(ssl, &pfx, sizeof(pfx)) <= 0) handle_error("SSL_write prefix");
+	size_t total = 0; while (total < sz) { int w = SSL_write(ssl, buf+total, (int)(sz-total)); if (w<=0) handle_error("SSL_write msg"); total += (size_t)w; }
+	free(buf);
+}
+
+static Ttycb__Envelope *pb_recv_envelope(SSL *ssl)
+{
+	uint64_t be=0; if (SSL_read(ssl, &be, sizeof(be)) <= 0) handle_error("SSL_read prefix");
+	size_t sz=(size_t)be64toh(be); if (sz==0) return NULL;
+	uint8_t *buf = malloc(sz); if (!buf) handle_error("malloc"); size_t tot=0; while (tot<sz){int r=SSL_read(ssl, buf+tot, (int)(sz-tot)); if (r<=0) handle_error("SSL_read msg"); tot+=(size_t)r;}
+	Ttycb__Envelope *e = ttycb__envelope__unpack(NULL, sz, buf); free(buf); if (!e) handle_error("unpack"); return e;
+}
+#endif
+
 volatile sig_atomic_t terminate = 0;
 
 // Signal handler
@@ -208,11 +235,13 @@ int main(int argc, char *argv[])
 	int sync = 0;
 	const char *role = NULL;
 	const char *server_ip = NULL;
+    int use_protobuf = 0;
 
 	static struct option long_options[] = {
 		{"sync",    no_argument, 0, 's'},
 		{"help",    no_argument, 0, 'h'},
 		{"version", no_argument, 0, 'v'},
+		{"protobuf", no_argument, 0, 1000},
 		{0, 0, 0, 0}
 	};
 
@@ -227,6 +256,9 @@ int main(int argc, char *argv[])
 		case 'v':
 			print_version();
 			exit(EXIT_SUCCESS);
+		case 1000:
+			use_protobuf = 1;
+			break;
 		default:
 			print_usage(argv[0]);
 			exit(EXIT_FAILURE);
@@ -244,7 +276,11 @@ int main(int argc, char *argv[])
 	server_ip = argv[optind + 1];
 
 	// Validate role
-	if (strcmp(role, "read") != 0 && strcmp(role, "write") != 0) {
+	if (strcmp(role, "read") != 0 && strcmp(role, "write") != 0
+#if HAVE_PROTOBUF
+    && !(use_protobuf && strcmp(role, "write_read") == 0)
+#endif
+	    ) {
 		fprintf(stderr, "Error: Command must be 'read' or 'write'\n\n");
 		print_usage(argv[0]);
 		exit(EXIT_FAILURE);
@@ -257,15 +293,17 @@ int main(int argc, char *argv[])
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGINT, &sa, NULL);
 
-	// Determine command to send
-	const char *command;
-	if (strcmp(role, "read") == 0) {
-		if (sync)
-			command = CMD_READ_BLOCKED;
-		else
-			command = CMD_READ;
-	} else {
-		command = CMD_WRITE;
+	// Determine command to send (classic mode)
+	const char *command = NULL;
+	if (!use_protobuf) {
+		if (strcmp(role, "read") == 0) {
+			if (sync)
+				command = CMD_READ_BLOCKED;
+			else
+				command = CMD_READ;
+		} else {
+			command = CMD_WRITE;
+		}
 	}
 
 	int server_port = SERVER_PORT;
@@ -314,25 +352,45 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	// Send command to server
-	char cmd_buffer[CMD_MAX_LEN];
-	snprintf(cmd_buffer, CMD_MAX_LEN, "%s\n", command);
-	if (SSL_write(ssl, cmd_buffer, strlen(cmd_buffer)) <= 0) {
-		perror("Failed to send command to server");
-		SSL_free(ssl);
-		close(sock);
-		SSL_CTX_free(ctx);
-		exit(EXIT_FAILURE);
-	}
+	// Classic vs protobuf
+	if (!use_protobuf) {
+		// Send command to server (classic)
+		char cmd_buffer[CMD_MAX_LEN];
+		snprintf(cmd_buffer, CMD_MAX_LEN, "%s\n", command);
+		if (SSL_write(ssl, cmd_buffer, strlen(cmd_buffer)) <= 0) {
+			perror("Failed to send command to server");
+			SSL_free(ssl);
+			close(sock);
+			SSL_CTX_free(ctx);
+			exit(EXIT_FAILURE);
+		}
 
-	// Send or receive data based on the role
-	if (!strcmp(role, "read")) {
-		if (sync)
-			read_from_server_blocked(ssl);
-		else
-			read_from_server(ssl);
-	} else if (!strcmp(role, "write")) {
-		write_to_server(ssl);
+		if (!strcmp(role, "read")) {
+			if (sync)
+				read_from_server_blocked(ssl);
+			else
+				read_from_server(ssl);
+		} else if (!strcmp(role, "write")) {
+			write_to_server(ssl);
+		}
+	} else {
+#if HAVE_PROTOBUF
+		if (strcmp(role, "write") == 0) {
+			// Read stdin
+			size_t cap=4096, used=0; uint8_t *buf = malloc(cap); if (!buf) handle_error("malloc");
+			while (1){ if (used==cap){cap*=2; uint8_t *t=realloc(buf,cap); if(!t) handle_error("realloc"); buf=t;} ssize_t r=read(STDIN_FILENO, buf+used, cap-used); if (r<0) handle_error("read"); if (r==0) break; used+=(size_t)r; }
+			Ttycb__Envelope env = TTYCB__ENVELOPE__INIT; Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT; wr.data.data = buf; wr.data.len = used; env.write = &wr; env.body_case = TTYCB__ENVELOPE__BODY_WRITE; pb_send_envelope(ssl, &env); free(buf);
+			Ttycb__Envelope *resp = pb_recv_envelope(ssl); if (!resp || resp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP || !resp->write_resp || !resp->write_resp->ok){ ttycb__envelope__free_unpacked(resp,NULL); fprintf(stderr, "Write failed\n"); SSL_free(ssl); close(sock); SSL_CTX_free(ctx); exit(EXIT_FAILURE);} ttycb__envelope__free_unpacked(resp,NULL);
+		} else if (strcmp(role, "read") == 0) {
+			Ttycb__Envelope env = TTYCB__ENVELOPE__INIT; Ttycb__ReadRequest rd = TTYCB__READ_REQUEST__INIT; env.read = &rd; env.body_case = TTYCB__ENVELOPE__BODY_READ; pb_send_envelope(ssl, &env);
+			Ttycb__Envelope *resp = pb_recv_envelope(ssl); if (!resp || resp->body_case != TTYCB__ENVELOPE__BODY_DATA || !resp->data){ ttycb__envelope__free_unpacked(resp,NULL); fprintf(stderr, "Read failed\n"); SSL_free(ssl); close(sock); SSL_CTX_free(ctx); exit(EXIT_FAILURE);} fwrite(resp->data->data.data,1,resp->data->data.len,stdout); fflush(stdout); ttycb__envelope__free_unpacked(resp,NULL);
+		} else if (strcmp(role, "write_read") == 0) {
+			// Write stdin then read back
+			size_t cap=4096, used=0; uint8_t *buf = malloc(cap); if (!buf) handle_error("malloc"); while (1){ if (used==cap){cap*=2; uint8_t *t=realloc(buf,cap); if(!t) handle_error("realloc"); buf=t;} ssize_t r=read(STDIN_FILENO, buf+used, cap-used); if (r<0) handle_error("read"); if (r==0) break; used+=(size_t)r; }
+			Ttycb__Envelope envw = TTYCB__ENVELOPE__INIT; Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT; wr.data.data=buf; wr.data.len=used; envw.write=&wr; envw.body_case=TTYCB__ENVELOPE__BODY_WRITE; pb_send_envelope(ssl, &envw); Ttycb__Envelope *wresp=pb_recv_envelope(ssl); if (!wresp || wresp->body_case!=TTYCB__ENVELOPE__BODY_WRITE_RESP || !wresp->write_resp || !wresp->write_resp->ok){ ttycb__envelope__free_unpacked(wresp,NULL); fprintf(stderr, "Write failed\n"); SSL_free(ssl); close(sock); SSL_CTX_free(ctx); exit(EXIT_FAILURE);} ttycb__envelope__free_unpacked(wresp,NULL); free(buf);
+			Ttycb__Envelope envr = TTYCB__ENVELOPE__INIT; Ttycb__ReadRequest rd = TTYCB__READ_REQUEST__INIT; envr.read=&rd; envr.body_case=TTYCB__ENVELOPE__BODY_READ; pb_send_envelope(ssl, &envr); Ttycb__Envelope *rresp=pb_recv_envelope(ssl); if (!rresp || rresp->body_case!=TTYCB__ENVELOPE__BODY_DATA || !rresp->data){ ttycb__envelope__free_unpacked(rresp,NULL); fprintf(stderr, "Read failed\n"); SSL_free(ssl); close(sock); SSL_CTX_free(ctx); exit(EXIT_FAILURE);} fwrite(rresp->data->data.data,1,rresp->data->data.len,stdout); fflush(stdout); ttycb__envelope__free_unpacked(rresp,NULL);
+		}
+#endif
 	}
 
 	// Initiate graceful shutdown after all data is sent
