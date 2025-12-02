@@ -1,1 +1,2 @@
-# No options currently defined
+option('static', type: 'boolean', value: false,
+       description: 'Build statically linked binaries')

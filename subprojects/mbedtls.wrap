@@ -1,0 +1,11 @@
+[wrap-git]
+url = https://github.com/Mbed-TLS/mbedtls.git
+revision = v3.6.2
+directory = mbedtls
+patch_directory = mbedtls
+depth= 1
+
+[provide]
+mbedtls = mbedtls_dep
+mbedx509 = mbedx509_dep
+mbedcrypto = mbedcrypto_dep

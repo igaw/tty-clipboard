@@ -46,14 +46,23 @@ client_sources = ['tty-client.c', 'tty-clipboard.c', config_h]
 common_deps = [mbedtls_dep, mbedx509_dep, mbedcrypto_dep, protobuf_dep]
 common_link_with = [pb_lib]
 
+# Configure for static or dynamic linking
+link_args = []
+if get_option('static')
+  link_args += ['-static']
+  message('Building with static linking')
+endif
+
 cb_server = executable('tty-cb-server', server_sources,
   dependencies: common_deps,
   link_with: common_link_with,
+  link_args: link_args,
   include_directories: pb_inc,
   install : true)
 
 cb_client = executable('tty-cb-client', client_sources,
   dependencies: common_deps,
   link_with: common_link_with,
+  link_args: link_args,
   include_directories: pb_inc,
   install : true)
