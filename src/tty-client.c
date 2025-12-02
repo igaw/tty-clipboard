@@ -13,12 +13,21 @@
 #include <getopt.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/rand.h>
 #include <arpa/inet.h>
 #include <stdint.h>
 #include <endian.h>
 
 // Forward declaration to avoid implicit declaration warnings
 void handle_error(const char *msg);
+
+volatile sig_atomic_t terminate = 0;
+
+// Signal handler
+void handle_sigint(int sig __attribute__((unused)))
+{
+	terminate = 1; // Set the termination flag
+}
 
 #if HAVE_PROTOBUF
 #include <protobuf-c/protobuf-c.h>
@@ -37,20 +46,20 @@ static void pb_send_envelope(SSL *ssl, Ttycb__Envelope *env)
 
 static Ttycb__Envelope *pb_recv_envelope(SSL *ssl)
 {
-	uint64_t be=0; if (SSL_read(ssl, &be, sizeof(be)) <= 0) handle_error("SSL_read prefix");
+	uint64_t be=0; 
+	int r = SSL_read(ssl, &be, sizeof(be));
+	if (r <= 0) {
+		// Check if this is a clean shutdown or actual error
+		if (terminate || SSL_get_error(ssl, r) == SSL_ERROR_ZERO_RETURN) {
+			return NULL; // Clean connection close or termination signal
+		}
+		handle_error("SSL_read prefix");
+	}
 	size_t sz=(size_t)be64toh(be); if (sz==0) return NULL;
-	uint8_t *buf = malloc(sz); if (!buf) handle_error("malloc"); size_t tot=0; while (tot<sz){int r=SSL_read(ssl, buf+tot, (int)(sz-tot)); if (r<=0) handle_error("SSL_read msg"); tot+=(size_t)r;}
+	uint8_t *buf = malloc(sz); if (!buf) handle_error("malloc"); size_t tot=0; while (tot<sz){int rr=SSL_read(ssl, buf+tot, (int)(sz-tot)); if (rr<=0) handle_error("SSL_read msg"); tot+=(size_t)rr;}
 	Ttycb__Envelope *e = ttycb__envelope__unpack(NULL, sz, buf); free(buf); if (!e) handle_error("unpack"); return e;
 }
 #endif
-
-volatile sig_atomic_t terminate = 0;
-
-// Signal handler
-void handle_sigint(int sig __attribute__((unused)))
-{
-	terminate = 1; // Set the termination flag
-}
 
 
 SSL_CTX *init_ssl_context()
@@ -235,7 +244,8 @@ int main(int argc, char *argv[])
 	int sync = 0;
 	const char *role = NULL;
 	const char *server_ip = NULL;
-    int use_protobuf = 0;
+	int use_protobuf = 0;
+	uint64_t client_id = 0; // used in protobuf mode to prevent sync loops
 
 	static struct option long_options[] = {
 		{"sync",    no_argument, 0, 's'},
@@ -279,6 +289,8 @@ int main(int argc, char *argv[])
 	if (strcmp(role, "read") != 0 && strcmp(role, "write") != 0
 #if HAVE_PROTOBUF
     && !(use_protobuf && strcmp(role, "write_read") == 0)
+    && !(use_protobuf && strcmp(role, "read_blocked") == 0)
+    && !(use_protobuf && strcmp(role, "write_subscribe") == 0)
 #endif
 	    ) {
 		fprintf(stderr, "Error: Command must be 'read' or 'write'\n\n");
@@ -295,6 +307,17 @@ int main(int argc, char *argv[])
 
 	// Determine command to send (classic mode)
 	const char *command = NULL;
+
+#if HAVE_PROTOBUF
+	// Generate a random non-zero client_id if protobuf is requested
+	if (use_protobuf) {
+		if (RAND_bytes((unsigned char *)&client_id, sizeof(client_id)) != 1) {
+			fprintf(stderr, "Failed to generate client_id\n");
+			exit(EXIT_FAILURE);
+		}
+		if (client_id == 0) client_id = 1; // ensure non-zero to indicate presence
+	}
+#endif
 	if (!use_protobuf) {
 		if (strcmp(role, "read") == 0) {
 			if (sync)
@@ -379,7 +402,7 @@ int main(int argc, char *argv[])
 			// Read stdin
 			size_t cap=4096, used=0; uint8_t *buf = malloc(cap); if (!buf) handle_error("malloc");
 			while (1){ if (used==cap){cap*=2; uint8_t *t=realloc(buf,cap); if(!t) handle_error("realloc"); buf=t;} ssize_t r=read(STDIN_FILENO, buf+used, cap-used); if (r<0) handle_error("read"); if (r==0) break; used+=(size_t)r; }
-			Ttycb__Envelope env = TTYCB__ENVELOPE__INIT; Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT; wr.data.data = buf; wr.data.len = used; env.write = &wr; env.body_case = TTYCB__ENVELOPE__BODY_WRITE; pb_send_envelope(ssl, &env); free(buf);
+			Ttycb__Envelope env = TTYCB__ENVELOPE__INIT; Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT; wr.data.data = buf; wr.data.len = used; wr.client_id = client_id; env.write = &wr; env.body_case = TTYCB__ENVELOPE__BODY_WRITE; pb_send_envelope(ssl, &env); free(buf);
 			Ttycb__Envelope *resp = pb_recv_envelope(ssl); if (!resp || resp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP || !resp->write_resp || !resp->write_resp->ok){ ttycb__envelope__free_unpacked(resp,NULL); fprintf(stderr, "Write failed\n"); SSL_free(ssl); close(sock); SSL_CTX_free(ctx); exit(EXIT_FAILURE);} ttycb__envelope__free_unpacked(resp,NULL);
 		} else if (strcmp(role, "read") == 0) {
 			Ttycb__Envelope env = TTYCB__ENVELOPE__INIT; Ttycb__ReadRequest rd = TTYCB__READ_REQUEST__INIT; env.read = &rd; env.body_case = TTYCB__ENVELOPE__BODY_READ; pb_send_envelope(ssl, &env);
@@ -387,13 +410,39 @@ int main(int argc, char *argv[])
 		} else if (strcmp(role, "write_read") == 0) {
 			// Write stdin then read back
 			size_t cap=4096, used=0; uint8_t *buf = malloc(cap); if (!buf) handle_error("malloc"); while (1){ if (used==cap){cap*=2; uint8_t *t=realloc(buf,cap); if(!t) handle_error("realloc"); buf=t;} ssize_t r=read(STDIN_FILENO, buf+used, cap-used); if (r<0) handle_error("read"); if (r==0) break; used+=(size_t)r; }
-			Ttycb__Envelope envw = TTYCB__ENVELOPE__INIT; Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT; wr.data.data=buf; wr.data.len=used; envw.write=&wr; envw.body_case=TTYCB__ENVELOPE__BODY_WRITE; pb_send_envelope(ssl, &envw); Ttycb__Envelope *wresp=pb_recv_envelope(ssl); if (!wresp || wresp->body_case!=TTYCB__ENVELOPE__BODY_WRITE_RESP || !wresp->write_resp || !wresp->write_resp->ok){ ttycb__envelope__free_unpacked(wresp,NULL); fprintf(stderr, "Write failed\n"); SSL_free(ssl); close(sock); SSL_CTX_free(ctx); exit(EXIT_FAILURE);} ttycb__envelope__free_unpacked(wresp,NULL); free(buf);
-			Ttycb__Envelope envr = TTYCB__ENVELOPE__INIT; Ttycb__ReadRequest rd = TTYCB__READ_REQUEST__INIT; envr.read=&rd; envr.body_case=TTYCB__ENVELOPE__BODY_READ; pb_send_envelope(ssl, &envr); Ttycb__Envelope *rresp=pb_recv_envelope(ssl); if (!rresp || rresp->body_case!=TTYCB__ENVELOPE__BODY_DATA || !rresp->data){ ttycb__envelope__free_unpacked(rresp,NULL); fprintf(stderr, "Read failed\n"); SSL_free(ssl); close(sock); SSL_CTX_free(ctx); exit(EXIT_FAILURE);} fwrite(rresp->data->data.data,1,rresp->data->data.len,stdout); fflush(stdout); ttycb__envelope__free_unpacked(rresp,NULL);
+			Ttycb__Envelope envw = TTYCB__ENVELOPE__INIT; Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT; wr.data.data=buf; wr.data.len=used; wr.client_id = client_id; envw.write=&wr; envw.body_case=TTYCB__ENVELOPE__BODY_WRITE; pb_send_envelope(ssl, &envw); Ttycb__Envelope *wresp=pb_recv_envelope(ssl); if (!wresp || wresp->body_case!=TTYCB__ENVELOPE__BODY_WRITE_RESP || !wresp->write_resp || !wresp->write_resp->ok){ ttycb__envelope__free_unpacked(wresp,NULL); fprintf(stderr, "Write failed\n"); SSL_free(ssl); close(sock); SSL_CTX_free(ctx); exit(EXIT_FAILURE);} ttycb__envelope__free_unpacked(wresp,NULL); free(buf);
+		Ttycb__Envelope envr = TTYCB__ENVELOPE__INIT; Ttycb__ReadRequest rd = TTYCB__READ_REQUEST__INIT; envr.read=&rd; envr.body_case=TTYCB__ENVELOPE__BODY_READ; pb_send_envelope(ssl, &envr); Ttycb__Envelope *rresp=pb_recv_envelope(ssl); if (!rresp || rresp->body_case!=TTYCB__ENVELOPE__BODY_DATA || !rresp->data){ ttycb__envelope__free_unpacked(rresp,NULL); fprintf(stderr, "Read failed\n"); SSL_free(ssl); close(sock); SSL_CTX_free(ctx); exit(EXIT_FAILURE);} fwrite(rresp->data->data.data,1,rresp->data->data.len,stdout); fflush(stdout); ttycb__envelope__free_unpacked(rresp,NULL);
+	} else if (strcmp(role, "read_blocked") == 0) {
+		// Subscribe mode - receive updates as they come
+		Ttycb__Envelope env = TTYCB__ENVELOPE__INIT; Ttycb__SubscribeRequest sub = TTYCB__SUBSCRIBE_REQUEST__INIT; sub.client_id = client_id; env.subscribe = &sub; env.body_case = TTYCB__ENVELOPE__BODY_SUBSCRIBE; pb_send_envelope(ssl, &env);
+		// Loop receiving data frames until connection closes or terminate signal
+		while (!terminate) {
+			Ttycb__Envelope *resp = pb_recv_envelope(ssl);
+			if (!resp) break; // connection closed
+			if (resp->body_case == TTYCB__ENVELOPE__BODY_DATA && resp->data) {
+				fwrite(resp->data->data.data, 1, resp->data->data.len, stdout);
+				fflush(stdout);
+			}
+			ttycb__envelope__free_unpacked(resp, NULL);
 		}
-#endif
+	} else if (strcmp(role, "write_subscribe") == 0) {
+		// Write stdin, then subscribe for future updates (testing loopback prevention)
+		size_t cap=4096, used=0; uint8_t *buf = malloc(cap); if (!buf) handle_error("malloc"); while (1){ if (used==cap){cap*=2; uint8_t *t=realloc(buf,cap); if(!t) handle_error("realloc"); buf=t;} ssize_t r=read(STDIN_FILENO, buf+used, cap-used); if (r<0) handle_error("read"); if (r==0) break; used+=(size_t)r; }
+		Ttycb__Envelope envw = TTYCB__ENVELOPE__INIT; Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT; wr.data.data=buf; wr.data.len=used; wr.client_id = client_id; envw.write=&wr; envw.body_case=TTYCB__ENVELOPE__BODY_WRITE; pb_send_envelope(ssl, &envw); Ttycb__Envelope *wresp=pb_recv_envelope(ssl); if (!wresp || wresp->body_case!=TTYCB__ENVELOPE__BODY_WRITE_RESP || !wresp->write_resp || !wresp->write_resp->ok){ ttycb__envelope__free_unpacked(wresp,NULL); fprintf(stderr, "Write failed\n"); SSL_free(ssl); close(sock); SSL_CTX_free(ctx); exit(EXIT_FAILURE);} ttycb__envelope__free_unpacked(wresp,NULL); free(buf);
+		// Now subscribe
+		Ttycb__Envelope env = TTYCB__ENVELOPE__INIT; Ttycb__SubscribeRequest sub = TTYCB__SUBSCRIBE_REQUEST__INIT; sub.client_id = client_id; env.subscribe = &sub; env.body_case = TTYCB__ENVELOPE__BODY_SUBSCRIBE; pb_send_envelope(ssl, &env);
+		while (!terminate) {
+			Ttycb__Envelope *resp = pb_recv_envelope(ssl);
+			if (!resp) break;
+			if (resp->body_case == TTYCB__ENVELOPE__BODY_DATA && resp->data) {
+				fwrite(resp->data->data.data, 1, resp->data->data.len, stdout);
+				fflush(stdout);
+			}
+			ttycb__envelope__free_unpacked(resp, NULL);
+		}
 	}
-
-	// Initiate graceful shutdown after all data is sent
+#endif
+}	// Initiate graceful shutdown after all data is sent
 	if (SSL_shutdown(ssl) == 0) {
 		// The first call to SSL_shutdown() sends a close_notify alert to the server
 		if (SSL_shutdown(ssl) == 1) {

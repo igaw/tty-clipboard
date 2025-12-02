@@ -27,10 +27,13 @@
 char *shared_buffer = NULL;
 size_t shared_capacity = 0;   // allocated size
 size_t shared_length = 0;     // used length
+uint64_t shared_message_id = 0; // message_id of current buffer
 unsigned int gen = 0;
 pthread_mutex_t buffer_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t buffer_cond = PTHREAD_COND_INITIALIZER;
 volatile sig_atomic_t terminate = 0;
+// Message ID counter for tracking clipboard updates (protobuf mode)
+static uint64_t next_message_id = 1;
 // Maximum allowed clipboard size (0 means unlimited)
 static size_t max_buffer_size = 0;
 // Oversize policy: reject (close connection) or drop (discard payload)
@@ -222,7 +225,7 @@ static void handle_write(SSL *ssl)
 	memcpy(shared_buffer, tmp, len);
 	shared_length = len;
 	gen++;
-	pthread_cond_signal(&buffer_cond);
+	pthread_cond_broadcast(&buffer_cond);
 	pthread_mutex_unlock(&buffer_mutex);
 	printf("Stored %zu bytes\n", len);
 	// Send success status
@@ -351,6 +354,7 @@ proto_mode: ;
 				Ttycb__WriteResponse wr = TTYCB__WRITE_RESPONSE__INIT;
 			wr.ok = ok;
 			if (!ok) wr.message = (char*)"oversize";
+			wr.message_id = 0; // No message_id for rejected writes
 			resp.write_resp = &wr; resp.body_case = TTYCB__ENVELOPE__BODY_WRITE_RESP;
 			size_t outsz = ttycb__envelope__get_packed_size(&resp);
 			unsigned char *outbuf = malloc(outsz);
@@ -370,12 +374,16 @@ proto_mode: ;
 				shared_buffer = nbuf; shared_capacity = len;
 			}
 			memcpy(shared_buffer, data, len);
-		shared_length = len; gen++; pthread_cond_signal(&buffer_cond);
+			shared_length = len;
+			uint64_t msg_id = next_message_id++;
+			shared_message_id = msg_id;
+			gen++;
+			pthread_cond_broadcast(&buffer_cond);
 		pthread_mutex_unlock(&buffer_mutex);
 		// reply ok
 		Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
 		Ttycb__WriteResponse wr = TTYCB__WRITE_RESPONSE__INIT;
-		wr.ok = 1; resp.write_resp = &wr; resp.body_case = TTYCB__ENVELOPE__BODY_WRITE_RESP;
+		wr.ok = 1; wr.message_id = msg_id; resp.write_resp = &wr; resp.body_case = TTYCB__ENVELOPE__BODY_WRITE_RESP;
 		size_t outsz = ttycb__envelope__get_packed_size(&resp);
 		unsigned char *outbuf = malloc(outsz);
 		if (!outbuf) { ttycb__envelope__free_unpacked(env, NULL); break; }
@@ -399,15 +407,27 @@ proto_mode: ;
 		if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 || ssl_write_all(ssl, outbuf, outsz) < 0) { free(outbuf); ttycb__envelope__free_unpacked(env, NULL); break; }
 		free(outbuf);
 	} else if (env->body_case == TTYCB__ENVELOPE__BODY_SUBSCRIBE && env->subscribe) {
-			unsigned int seen = 0;
-			while (!terminate) {
-				pthread_mutex_lock(&buffer_mutex);
-				while (seen == gen && !terminate) pthread_cond_wait(&buffer_cond, &buffer_mutex);
+		pthread_mutex_lock(&buffer_mutex);
+		unsigned int seen = gen; // Start from current generation to only receive future updates
+		uint64_t last_sent_message_id = shared_message_id; // Track last message_id sent to this subscriber
+		pthread_mutex_unlock(&buffer_mutex);
+		while (!terminate) {
+			pthread_mutex_lock(&buffer_mutex);
+			while (seen == gen && !terminate) pthread_cond_wait(&buffer_cond, &buffer_mutex);
 			if (terminate) { pthread_mutex_unlock(&buffer_mutex); break; }
-			seen = gen; size_t len = shared_length;
+			seen = gen;
+			// Skip if we've already sent this message to this subscriber
+			if (shared_message_id == last_sent_message_id) {
+				pthread_mutex_unlock(&buffer_mutex);
+				continue;
+			}
+			size_t len = shared_length;
+			uint64_t msg_id = shared_message_id;
+			last_sent_message_id = msg_id;
 			Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
 			Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
 			df.data.len = len; df.data.data = (uint8_t*)shared_buffer;
+			df.message_id = msg_id;
 			resp.data = &df; resp.body_case = TTYCB__ENVELOPE__BODY_DATA;
 			size_t outsz = ttycb__envelope__get_packed_size(&resp);
 			unsigned char *outbuf = malloc(outsz);

@@ -3,19 +3,24 @@ package ttycb;
 
 message WriteRequest {
   bytes data = 1;
+  uint64 client_id = 2;
 }
 
 message ReadRequest {}
 
-message SubscribeRequest {}
+message SubscribeRequest {
+  uint64 client_id = 1;
+}
 
 message WriteResponse {
   bool ok = 1;
   string message = 2;
+  uint64 message_id = 3;
 }
 
 message DataFrame {
   bytes data = 1;
+  uint64 message_id = 2;
 }
 
 message Error {
