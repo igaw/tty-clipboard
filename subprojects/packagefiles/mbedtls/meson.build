@@ -19,7 +19,7 @@ mbedtls_build = custom_target('mbedtls-configure',
      + '(cd "$src" && git submodule update --init 2>/dev/null || true) && '
      + 'mkdir -p "$bld/cmake-build" && cd "$bld/cmake-build" && '
     + 'cmake "$src" -DCMAKE_BUILD_TYPE=Release -DENABLE_PROGRAMS=OFF -DENABLE_TESTING=OFF -DUSE_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON '
-    + ' -DCMAKE_C_FLAGS="-Wno-error=unterminated-string-initialization" && '
+    + ' -DCMAKE_C_FLAGS="-Wno-error" && '
      + 'make -j"$(nproc)" mbedtls mbedx509 mbedcrypto && '
      + 'cp library/libmbedtls.a library/libmbedx509.a library/libmbedcrypto.a "$bld"')
     .format(source_root, build_root)
