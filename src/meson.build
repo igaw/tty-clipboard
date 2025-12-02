@@ -28,6 +28,7 @@ pb = custom_target('gen-proto',
   input: proto_file,
   output: ['clipboard.pb-c.c', 'clipboard.pb-c.h'],
   command: [protoc_c, '--c_out=@OUTDIR@', '--proto_path=@SOURCE_ROOT@/proto', 'clipboard.proto'],
+  depends: protoc_depends,
 )
 
 pb_inc = include_directories('.')
@@ -36,8 +37,7 @@ pb_inc = include_directories('.')
 pb_lib = static_library('protobuf-gen',
   pb,
   c_args: ['-Wno-pedantic'],
-  dependencies: protobuf_dep,
-  include_directories: pb_inc,
+  include_directories: [pb_inc, protobuf_inc],
 )
 
 server_sources = ['tty-server.c', 'tty-clipboard.c', config_h]
@@ -49,7 +49,7 @@ common_link_with = [pb_lib]
 # Configure for static or dynamic linking
 link_args = []
 if get_option('static')
-  link_args += ['-static']
+  link_args += ['-static', '-lpthread', '-lm']
   message('Building with static linking')
 endif
 

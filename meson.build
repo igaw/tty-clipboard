@@ -34,8 +34,45 @@ else
   endif
 endif
 
-protobuf_dep = dependency('libprotobuf-c', required: true)
-protoc_c = find_program('protoc-c', required: true)
+# Protobuf-C
+protoc_depends = []
+if get_option('static')
+  message('Static build: prefer static libprotobuf-c, fallback to subproject')
+  protobuf_dep = dependency('libprotobuf-c', required: false, static: true)
+  protoc_c = find_program('protoc-c', required: false)
+
+  if not protobuf_dep.found()
+    message('System static libprotobuf-c not found, using subproject')
+    pb_sub = subproject('libprotobuf-c')
+    protobuf_dep = pb_sub.get_variable('protobuf_c_dep')
+    protoc_depends = [pb_sub.get_variable('protobufc_build')]
+    protobuf_inc = pb_sub.get_variable('protobuf_c_inc')
+  endif
+  
+  if not protoc_c.found()
+    error('protoc-c is required but not found. Please install libprotobuf-c-dev or protobuf-c-compiler.')
+  endif
+else
+  protobuf_dep = dependency('libprotobuf-c', required: false)
+  protoc_c = find_program('protoc-c', required: false)
+
+  if not protobuf_dep.found()
+    message('System libprotobuf-c not found, using subproject')
+    pb_sub = subproject('libprotobuf-c')
+    protobuf_dep = pb_sub.get_variable('protobuf_c_dep')
+    protoc_depends = [pb_sub.get_variable('protobufc_build')]
+    protobuf_inc = pb_sub.get_variable('protobuf_c_inc')
+  endif
+  
+  if not protoc_c.found()
+    error('protoc-c is required but not found. Please install libprotobuf-c-dev or protobuf-c-compiler.')
+  endif
+endif
+
+if not is_variable('protobuf_inc')
+  # Use empty include dirs for system case; headers are in default system include path
+  protobuf_inc = include_directories()
+endif
 
 # Detect mbedTLS version for API compatibility
 mbedtls_version = mbedtls_dep.version()
