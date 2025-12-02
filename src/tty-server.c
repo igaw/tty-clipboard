@@ -21,6 +21,7 @@
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/x509.h>
 #include <mbedtls/error.h>
+#include <mbedtls/debug.h>
 #include <sys/select.h>
 #include <stdint.h>
 #include <endian.h>
@@ -205,6 +206,13 @@ ssl_context_t *init_ssl_context()
 
 	// Set RNG callback
 	mbedtls_ssl_conf_rng(&ssl_ctx->conf, mbedtls_ctr_drbg_random, &ssl_ctx->ctr_drbg);
+
+	// Optional debug: enable detailed mbedTLS logging when MBEDTLS_DEBUG env var is set
+	const char *dbg = getenv("MBEDTLS_DEBUG");
+	if (dbg && *dbg) {
+		mbedtls_debug_set_threshold(4);
+		mbedtls_ssl_conf_dbg(&ssl_ctx->conf, mbedtls_debug_print_msg, NULL);
+	}
 
 	// Set CA certificate for client verification
 	mbedtls_ssl_conf_ca_chain(&ssl_ctx->conf, &ssl_ctx->cacert, NULL);
