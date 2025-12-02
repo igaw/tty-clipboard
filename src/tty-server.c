@@ -159,15 +159,15 @@ static int send_protobuf_response(SSL *ssl, Ttycb__Envelope *resp)
 	unsigned char *outbuf = malloc(outsz);
 	if (!outbuf)
 		return -1;
-	
+
 	ttycb__envelope__pack(resp, outbuf);
 	uint64_t pfx = htobe64((uint64_t)outsz);
-	
+
 	int result = 0;
 	if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 ||
 	    ssl_write_all(ssl, outbuf, outsz) < 0)
 		result = -1;
-	
+
 	free(outbuf);
 	return result;
 }
@@ -177,7 +177,7 @@ static int handle_write_request(SSL *ssl, Ttycb__WriteRequest *write_req)
 	size_t len = write_req->data.len;
 	const unsigned char *data = write_req->data.data;
 	int oversize = (max_buffer_size && len > max_buffer_size);
-	
+
 	if (oversize) {
 		int ok = (oversize_policy == OVERSIZE_DROP);
 		Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
@@ -190,7 +190,7 @@ static int handle_write_request(SSL *ssl, Ttycb__WriteRequest *write_req)
 		resp.body_case = TTYCB__ENVELOPE__BODY_WRITE_RESP;
 		return send_protobuf_response(ssl, &resp);
 	}
-	
+
 	// Store the data
 	pthread_mutex_lock(&buffer_mutex);
 	if (len > shared_capacity) {
@@ -209,7 +209,7 @@ static int handle_write_request(SSL *ssl, Ttycb__WriteRequest *write_req)
 	gen++;
 	pthread_cond_broadcast(&buffer_cond);
 	pthread_mutex_unlock(&buffer_mutex);
-	
+
 	// Send success response
 	Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
 	Ttycb__WriteResponse wr = TTYCB__WRITE_RESPONSE__INIT;
@@ -230,7 +230,7 @@ static int handle_read_request(SSL *ssl)
 	df.data.data = (uint8_t *)shared_buffer;
 	resp.data = &df;
 	resp.body_case = TTYCB__ENVELOPE__BODY_DATA;
-	
+
 	size_t outsz = ttycb__envelope__get_packed_size(&resp);
 	unsigned char *outbuf = malloc(outsz);
 	if (!outbuf) {
@@ -239,13 +239,13 @@ static int handle_read_request(SSL *ssl)
 	}
 	ttycb__envelope__pack(&resp, outbuf);
 	pthread_mutex_unlock(&buffer_mutex);
-	
+
 	uint64_t pfx = htobe64((uint64_t)outsz);
 	int result = 0;
 	if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 ||
 	    ssl_write_all(ssl, outbuf, outsz) < 0)
 		result = -1;
-	
+
 	free(outbuf);
 	return result;
 }
@@ -253,12 +253,12 @@ static int handle_read_request(SSL *ssl)
 static int handle_subscribe_request(SSL *ssl, Ttycb__SubscribeRequest *sub_req)
 {
 	(void)sub_req; // Unused for now, but client_id could be used for filtering
-	
+
 	pthread_mutex_lock(&buffer_mutex);
 	unsigned int seen = gen; // Start from current generation
 	uint64_t last_sent_message_id = shared_message_id;
 	pthread_mutex_unlock(&buffer_mutex);
-	
+
 	while (!terminate) {
 		pthread_mutex_lock(&buffer_mutex);
 		while (seen == gen && !terminate)
@@ -268,17 +268,17 @@ static int handle_subscribe_request(SSL *ssl, Ttycb__SubscribeRequest *sub_req)
 			break;
 		}
 		seen = gen;
-		
+
 		// Skip if we've already sent this message to this subscriber
 		if (shared_message_id == last_sent_message_id) {
 			pthread_mutex_unlock(&buffer_mutex);
 			continue;
 		}
-		
+
 		size_t len = shared_length;
 		uint64_t msg_id = shared_message_id;
 		last_sent_message_id = msg_id;
-		
+
 		Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
 		Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
 		df.data.len = len;
@@ -286,7 +286,7 @@ static int handle_subscribe_request(SSL *ssl, Ttycb__SubscribeRequest *sub_req)
 		df.message_id = msg_id;
 		resp.data = &df;
 		resp.body_case = TTYCB__ENVELOPE__BODY_DATA;
-		
+
 		size_t outsz = ttycb__envelope__get_packed_size(&resp);
 		unsigned char *outbuf = malloc(outsz);
 		if (!outbuf) {
@@ -295,7 +295,7 @@ static int handle_subscribe_request(SSL *ssl, Ttycb__SubscribeRequest *sub_req)
 		}
 		ttycb__envelope__pack(&resp, outbuf);
 		pthread_mutex_unlock(&buffer_mutex);
-		
+
 		uint64_t pfx = htobe64((uint64_t)outsz);
 		if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 ||
 		    ssl_write_all(ssl, outbuf, outsz) < 0) {
@@ -310,38 +310,38 @@ static int handle_subscribe_request(SSL *ssl, Ttycb__SubscribeRequest *sub_req)
 static Ttycb__Envelope *receive_envelope(SSL *ssl, int *error)
 {
 	*error = 0;
-	
+
 	uint64_t be_len = 0;
 	int rr = SSL_read(ssl, &be_len, sizeof(be_len));
 	if (rr <= 0) {
 		*error = 1;
 		return NULL;
 	}
-	
+
 	size_t mlen = (size_t)be64toh(be_len);
 	if (mlen == 0)
 		return NULL; // Skip empty message, not an error
-	
+
 	unsigned char *mbuf = malloc(mlen);
 	if (!mbuf) {
 		*error = 1;
 		return NULL;
 	}
-	
+
 	if (ssl_read_all(ssl, mbuf, mlen) < 0) {
 		free(mbuf);
 		*error = 1;
 		return NULL;
 	}
-	
+
 	Ttycb__Envelope *env = ttycb__envelope__unpack(NULL, mlen, mbuf);
 	free(mbuf);
-	
+
 	if (!env) {
 		printf("Failed to unpack envelope\n");
 		*error = 1;
 	}
-	
+
 	return env;
 }
 
@@ -360,20 +360,23 @@ void *client_handler(void *arg)
 		}
 
 		int result = 0;
-		if (env->body_case == TTYCB__ENVELOPE__BODY_WRITE && env->write) {
+		if (env->body_case == TTYCB__ENVELOPE__BODY_WRITE &&
+		    env->write) {
 			result = handle_write_request(ssl, env->write);
-		} else if (env->body_case == TTYCB__ENVELOPE__BODY_READ && env->read) {
+		} else if (env->body_case == TTYCB__ENVELOPE__BODY_READ &&
+			   env->read) {
 			result = handle_read_request(ssl);
-		} else if (env->body_case == TTYCB__ENVELOPE__BODY_SUBSCRIBE && env->subscribe) {
+		} else if (env->body_case == TTYCB__ENVELOPE__BODY_SUBSCRIBE &&
+			   env->subscribe) {
 			result = handle_subscribe_request(ssl, env->subscribe);
 		}
-		
+
 		ttycb__envelope__free_unpacked(env, NULL);
-		
+
 		if (result < 0)
 			break;
 	}
-	
+
 	if (SSL_shutdown(ssl) == 0)
 		SSL_shutdown(ssl);
 	SSL_free(ssl);
@@ -492,8 +495,7 @@ static int verify_client_certificate(SSL *ssl)
 
 	long verify_result = SSL_get_verify_result(ssl);
 	if (verify_result != X509_V_OK) {
-		printf("Certificate verification failed: %ld\n",
-		       verify_result);
+		printf("Certificate verification failed: %ld\n", verify_result);
 		return -1;
 	}
 
@@ -503,8 +505,8 @@ static int verify_client_certificate(SSL *ssl)
 static void spawn_client_handler(SSL *ssl, int client_fd)
 {
 	pthread_t client_thread;
-	if (pthread_create(&client_thread, NULL, client_handler,
-			   (void *)ssl) != 0) {
+	if (pthread_create(&client_thread, NULL, client_handler, (void *)ssl) !=
+	    0) {
 		perror("Failed to create client thread");
 		SSL_free(ssl);
 		close(client_fd);
@@ -589,15 +591,13 @@ static void parse_max_size(const char *max_size_arg)
 	char *end = NULL;
 	unsigned long long v = strtoull(max_size_arg, &end, 10);
 	if (end == max_size_arg) {
-		fprintf(stderr, "Invalid --max-size value: %s\n",
-			max_size_arg);
+		fprintf(stderr, "Invalid --max-size value: %s\n", max_size_arg);
 		exit(EXIT_FAILURE);
 	}
 	unsigned long long mult = 1ULL;
 	if (*end) {
 		if (end[1] != '\0') {
-			fprintf(stderr, "Invalid --max-size suffix: %s\n",
-				end);
+			fprintf(stderr, "Invalid --max-size suffix: %s\n", end);
 			exit(EXIT_FAILURE);
 		}
 		switch (*end) {
