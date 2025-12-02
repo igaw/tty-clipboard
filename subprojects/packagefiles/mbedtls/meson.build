@@ -33,7 +33,7 @@ mbedtls_build = custom_target('mbedtls-configure',
     ('src="@0@"; bld="@1@"; '
      + '(cd "$src" && git submodule update --init 2>/dev/null || true) && '
      + 'mkdir -p "$bld/cmake-build" && cd "$bld/cmake-build" && '
-    + 'cmake "$src" -DCMAKE_BUILD_TYPE=Release -DENABLE_PROGRAMS=OFF -DENABLE_TESTING=OFF -DUSE_SHARED_LIBS=OFF -DMBEDTLS_FATAL_WARNINGS=OFF -DMBEDTLS_CONFIG_FILE=\"include/mbedtls/mbedtls_config.h\" -DCMAKE_POSITION_INDEPENDENT_CODE=ON@2@ && '
+    + 'cmake "$src" -DCMAKE_BUILD_TYPE=Release -DENABLE_PROGRAMS=OFF -DENABLE_TESTING=OFF -DUSE_SHARED_LIBS=OFF -DMBEDTLS_FATAL_WARNINGS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON@2@ && '
      + 'make -j"$(nproc)" mbedtls mbedx509 mbedcrypto && '
      + 'cp library/libmbedtls.a library/libmbedx509.a library/libmbedcrypto.a "$bld"')
     .format(source_root, build_root, cmake_cflags_arg)

@@ -25,6 +25,13 @@
 #include <stdint.h>
 #include <endian.h>
 
+static void tls_debug(void *ctx, int level, const char *file, int line, const char *msg)
+{
+	(void)ctx;
+	fprintf(stderr, "mbedtls[%d] %s:%d: %s\n", level, file, line, msg);
+}
+
+
 // Forward declaration to avoid implicit declaration warnings
 void handle_error(const char *msg);
 
@@ -246,7 +253,7 @@ ssl_context_t *init_ssl_context()
 	const char *dbg = getenv("MBEDTLS_DEBUG");
 	if (dbg && *dbg) {
 		mbedtls_debug_set_threshold(4);
-		mbedtls_ssl_conf_dbg(&ssl_ctx->conf, mbedtls_debug_print_msg, NULL);
+		mbedtls_ssl_conf_dbg(&ssl_ctx->conf, tls_debug, NULL);
 	}
 
 	// Set CA certificate for verification
