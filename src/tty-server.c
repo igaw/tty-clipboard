@@ -407,10 +407,11 @@ void *client_handler(void *arg)
 
 struct server_args {
 	int port;
+	const char *bind_addr;
 	SSL_CTX *ctx;
 };
 
-static int create_server_socket(int port)
+static int create_server_socket(int port, const char *bind_addr)
 {
 	int server_fd;
 	struct sockaddr_in address;
@@ -433,7 +434,17 @@ static int create_server_socket(int port)
 	}
 
 	address.sin_family = AF_INET;
-	address.sin_addr.s_addr = INADDR_ANY;
+	if (bind_addr && strcmp(bind_addr, "0.0.0.0") != 0) {
+		if (inet_pton(AF_INET, bind_addr, &address.sin_addr) <= 0) {
+			fprintf(stderr, "Invalid bind address: %s\n", bind_addr);
+			close(server_fd);
+			exit(EXIT_FAILURE);
+		}
+		LOG_INFO("Binding to address %s", bind_addr);
+	} else {
+		address.sin_addr.s_addr = INADDR_ANY;
+		LOG_DEBUG("Binding to all interfaces (0.0.0.0)");
+	}
 	address.sin_port = htons(port);
 
 	// Bind the socket
@@ -546,7 +557,7 @@ static void *start_server(void *data)
 	struct server_args *args = data;
 
 	// Create and configure server socket
-	int server_fd = create_server_socket(args->port);
+	int server_fd = create_server_socket(args->port, args->bind_addr);
 
 	// Accept client connections
 	while (!terminate) {
@@ -586,10 +597,10 @@ static void print_usage(const char *prog_name)
 	printf("  -V, --version    Display version information\n");
 	printf("  -v, --verbose    Enable verbose logging (can be repeated for more detail)\n");
 	printf("  -d, --daemon     Run in daemon mode (background)\n");
+	printf("  -b, --bind IP    Bind to specific IP address (default: 0.0.0.0)\n");
+	printf("  -p, --port PORT  Server port (default: %d)\n", SERVER_PORT);
 	printf("  -m, --max-size N[K|M|G]  Set maximum clipboard size (0=unlimited)\n");
-	printf("  -p, --oversize-policy reject|drop  Action on oversize write (default: reject)\n");
-	printf("\nPort:\n");
-	printf("  %d              Server port (all operations)\n", SERVER_PORT);
+	printf("  --oversize-policy reject|drop  Action on oversize write (default: reject)\n");
 	printf("\nProtocol:\n");
 	printf("  Client connects and sends command: %s, %s, or %s\n", CMD_READ,
 	       CMD_WRITE, CMD_READ_BLOCKED);
@@ -698,6 +709,8 @@ int main(int argc, char *argv[])
 	int opt;
 	int daemon_mode = 0;
 	int verbose_count = 0;
+	int server_port = SERVER_PORT;
+	const char *bind_addr = NULL;
 	char *max_size_arg = NULL;
 
 	static struct option long_options[] = {
@@ -705,12 +718,14 @@ int main(int argc, char *argv[])
 		{ "version", no_argument, 0, 'V' },
 		{ "verbose", no_argument, 0, 'v' },
 		{ "daemon", no_argument, 0, 'd' },
+		{ "bind", required_argument, 0, 'b' },
+		{ "port", required_argument, 0, 'p' },
 		{ "max-size", required_argument, 0, 'm' },
-		{ "oversize-policy", required_argument, 0, 'p' },
+		{ "oversize-policy", required_argument, 0, 1 },
 		{ 0, 0, 0, 0 }
 	};
 
-	while ((opt = getopt_long(argc, argv, "hvVdm:p:", long_options, NULL)) !=
+	while ((opt = getopt_long(argc, argv, "hvVdb:p:m:", long_options, NULL)) !=
 	       -1) {
 		switch (opt) {
 		case 'h':
@@ -725,10 +740,20 @@ int main(int argc, char *argv[])
 		case 'd':
 			daemon_mode = 1;
 			break;
+		case 'b':
+			bind_addr = optarg;
+			break;
+		case 'p':
+			server_port = atoi(optarg);
+			if (server_port <= 0 || server_port > 65535) {
+				fprintf(stderr, "Error: Invalid port number: %s\n", optarg);
+				exit(EXIT_FAILURE);
+			}
+			break;
 		case 'm':
 			max_size_arg = optarg;
 			break;
-		case 'p':
+		case 1:
 			if (strcmp(optarg, "reject") == 0)
 				oversize_policy = OVERSIZE_REJECT;
 			else if (strcmp(optarg, "drop") == 0)
@@ -780,10 +805,10 @@ int main(int argc, char *argv[])
 	// Initialize SSL context
 	LOG_INFO("Initializing SSL context");
 	SSL_CTX *ctx = init_ssl_context();
-	struct server_args args = { .port = SERVER_PORT, .ctx = ctx };
+	struct server_args args = { .port = server_port, .bind_addr = bind_addr, .ctx = ctx };
 
 	// Start server thread
-	LOG_INFO("Starting server on port %d", SERVER_PORT);
+	LOG_INFO("Starting server on port %d", server_port);
 	pthread_t server_thread;
 	if (pthread_create(&server_thread, NULL, start_server, &args) != 0) {
 		LOG_ERROR("Failed to create server thread");

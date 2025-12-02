@@ -8,6 +8,10 @@ TEST_CONFIG_DIR="$3"
 
 export XDG_CONFIG_HOME="$TEST_CONFIG_DIR"
 
+# Test configuration
+TEST_IP="127.0.0.2"
+TEST_PORT="15457"
+
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]]; then
     kill "$SERVER_PID" 2>/dev/null || true
@@ -18,7 +22,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Start server
-"$SERVER_BIN" &
+"$SERVER_BIN" -b $TEST_IP -p $TEST_PORT &
 SERVER_PID=$!
 sleep 2
 
@@ -26,13 +30,13 @@ echo "Test 1: Protobuf write"
 TMP_IN=$(mktemp)
 echo "Hello protobuf world" > "$TMP_IN"
 
-cat "$TMP_IN" | "$CLIENT_BIN" write 127.0.0.1
+cat "$TMP_IN" | "$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT write
 sleep 1
 echo "✓ Protobuf write succeeded"
 
 echo "Test 2: Protobuf read"
 TMP_OUT=$(mktemp)
-"$CLIENT_BIN" read 127.0.0.1 > "$TMP_OUT"
+"$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT read > "$TMP_OUT"
 
 if cmp -s "$TMP_IN" "$TMP_OUT"; then
   echo "✓ Protobuf read matched"
@@ -46,7 +50,7 @@ TMP_IN2=$(mktemp)
 TMP_OUT2=$(mktemp)
 echo "Bidirectional test data" > "$TMP_IN2"
 
-cat "$TMP_IN2" | "$CLIENT_BIN" write_read 127.0.0.1 > "$TMP_OUT2"
+cat "$TMP_IN2" | "$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT write_read > "$TMP_OUT2"
 
 if cmp -s "$TMP_IN2" "$TMP_OUT2"; then
   echo "✓ Protobuf write_read roundtrip succeeded"
@@ -60,9 +64,9 @@ TMP_BIN=$(mktemp)
 TMP_BIN_OUT=$(mktemp)
 head -c 2048 /dev/urandom > "$TMP_BIN"
 
-cat "$TMP_BIN" | "$CLIENT_BIN" write 127.0.0.1
+cat "$TMP_BIN" | "$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT write
 sleep 1
-"$CLIENT_BIN" read 127.0.0.1 > "$TMP_BIN_OUT"
+"$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT read > "$TMP_BIN_OUT"
 
 if cmp -s "$TMP_BIN" "$TMP_BIN_OUT"; then
   echo "✓ Binary protobuf roundtrip succeeded"

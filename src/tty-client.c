@@ -170,7 +170,7 @@ void handle_error(const char *msg)
 
 static void print_usage(const char *prog_name)
 {
-	printf("Usage: %s [OPTIONS] <command> <server_ip>\n", prog_name);
+	printf("Usage: %s [OPTIONS] <command>\n", prog_name);
 	printf("\nA secure clipboard client for TTY environments.\n");
 	printf("\nCommands:\n");
 	printf("  read             Read clipboard content from server\n");
@@ -182,16 +182,20 @@ static void print_usage(const char *prog_name)
 	printf("  -h, --help       Display this help message\n");
 	printf("  -V, --version    Display version information\n");
 	printf("  -v, --verbose    Enable verbose logging (repeat for more detail)\n");
+	printf("  -s, --server IP  Server IP address (default: 127.0.0.1)\n");
+	printf("  -p, --port PORT  Server port (default: %d)\n", SERVER_PORT);
 	printf("\nExamples:\n");
-	printf("  %s write 192.168.1.100            # Write stdin to clipboard\n",
+	printf("  %s write                          # Write to localhost:5457\n",
 	       prog_name);
-	printf("  %s read 192.168.1.100             # Read clipboard to stdout\n",
+	printf("  %s read                           # Read from localhost:5457\n",
 	       prog_name);
-	printf("  %s -v write 192.168.1.100         # Write with INFO logging\n",
+	printf("  %s -s 192.168.1.100 write         # Write to remote server\n",
 	       prog_name);
-	printf("  %s -v -v read 192.168.1.100       # Read with DEBUG logging\n",
+	printf("  %s -s 10.0.0.1 -p 9999 read       # Custom server and port\n",
 	       prog_name);
-	printf("  %s read_blocked 192.168.1.100     # Subscribe to updates\n",
+	printf("  %s -v read                        # Read with INFO logging\n",
+	       prog_name);
+	printf("  %s -v -v write                    # Write with DEBUG logging\n",
 	       prog_name);
 	printf("\n");
 }
@@ -479,7 +483,8 @@ static void do_write_subscribe(SSL *ssl, uint64_t client_id, SSL_CTX *ctx,
 int main(int argc, char *argv[])
 {
 	const char *role = NULL;
-	const char *server_ip = NULL;
+	const char *server_ip = "127.0.0.1";
+	int server_port = SERVER_PORT;
 	int opt;
 	int verbose_count = 0;
 
@@ -488,9 +493,13 @@ int main(int argc, char *argv[])
 						  'V' },
 						{ "verbose", no_argument, 0,
 						  'v' },
+						{ "server", required_argument, 0,
+						  's' },
+						{ "port", required_argument, 0,
+						  'p' },
 						{ 0, 0, 0, 0 } };
 
-	while ((opt = getopt_long(argc, argv, "hvV", long_options, NULL)) !=
+	while ((opt = getopt_long(argc, argv, "hvVs:p:", long_options, NULL)) !=
 	       -1) {
 		switch (opt) {
 		case 'h':
@@ -501,6 +510,16 @@ int main(int argc, char *argv[])
 			exit(EXIT_SUCCESS);
 		case 'v':
 			verbose_count++;
+			break;
+		case 's':
+			server_ip = optarg;
+			break;
+		case 'p':
+			server_port = atoi(optarg);
+			if (server_port <= 0 || server_port > 65535) {
+				fprintf(stderr, "Error: Invalid port number: %s\n", optarg);
+				exit(EXIT_FAILURE);
+			}
 			break;
 		default:
 			print_usage(argv[0]);
@@ -518,14 +537,13 @@ int main(int argc, char *argv[])
 	}
 
 	// Parse positional arguments
-	if (optind + 2 > argc) {
-		fprintf(stderr, "Error: Missing required arguments\n\n");
+	if (optind >= argc) {
+		fprintf(stderr, "Error: Missing command argument\n\n");
 		print_usage(argv[0]);
 		exit(EXIT_FAILURE);
 	}
 
 	role = argv[optind];
-	server_ip = argv[optind + 1];
 
 	// Validate role
 	if (strcmp(role, "read") != 0 && strcmp(role, "write") != 0 &&
@@ -550,9 +568,9 @@ int main(int argc, char *argv[])
 	SSL_CTX *ctx = init_ssl_context();
 
 	// Connect to server
-	LOG_INFO("Connecting to server %s:%d", server_ip, SERVER_PORT);
+	LOG_INFO("Connecting to server %s:%d", server_ip, server_port);
 	int sock;
-	SSL *ssl = connect_to_server(server_ip, SERVER_PORT, ctx, &sock);
+	SSL *ssl = connect_to_server(server_ip, server_port, ctx, &sock);
 
 	// Execute the requested role
 	LOG_INFO("Executing command: %s", role);

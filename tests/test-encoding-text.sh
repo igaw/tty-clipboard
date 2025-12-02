@@ -8,6 +8,10 @@ TEST_CONFIG_DIR="$3"
 
 export XDG_CONFIG_HOME="$TEST_CONFIG_DIR"
 
+# Test configuration
+TEST_IP="127.0.0.2"
+TEST_PORT="15457"
+
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]]; then
     kill "$SERVER_PID" 2>/dev/null || true
@@ -17,16 +21,16 @@ cleanup() {
 trap cleanup EXIT
 
 # Start server
-"$SERVER_BIN" &
+"$SERVER_BIN" -b $TEST_IP -p $TEST_PORT &
 SERVER_PID=$!
 sleep 2
 
 pass_case() {
   local label="$1" payload="$2"
-  printf "%s" "$payload" | "$CLIENT_BIN" write 127.0.0.1
+  printf "%s" "$payload" | "$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT write
   sleep 0.5
   local out
-  out=$("$CLIENT_BIN" read 127.0.0.1)
+  out=$("$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT read)
   if [[ "$out" != "$payload" ]]; then
     echo "FAIL ($label): expected '$payload' got '$out'" >&2
     exit 1

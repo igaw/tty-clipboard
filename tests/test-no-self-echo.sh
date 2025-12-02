@@ -9,6 +9,10 @@ TEST_CONFIG_DIR="$3"
 
 export XDG_CONFIG_HOME="$TEST_CONFIG_DIR"
 
+# Test configuration
+TEST_IP="127.0.0.2"
+TEST_PORT="15457"
+
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]]; then
     kill "$SERVER_PID" 2>/dev/null || true
@@ -20,7 +24,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Start server
-"$SERVER_BIN" &
+"$SERVER_BIN" -b $TEST_IP -p $TEST_PORT &
 SERVER_PID=$!
 sleep 2
 
@@ -32,7 +36,7 @@ SUBOUT=$(mktemp)
 echo "=== Testing write_subscribe self-echo prevention ==="
 echo "my_marker_$$" > /tmp/write_$$
 
-timeout 10 cat /tmp/write_$$ | "$CLIENT_BIN" write_subscribe 127.0.0.1 > "$SUBOUT" 2>/dev/null &
+timeout 10 cat /tmp/write_$$ | "$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT write_subscribe > "$SUBOUT" 2>/dev/null &
 SUB_PID=$!
 rm /tmp/write_$$
 
@@ -40,7 +44,7 @@ sleep 1
 
 # Write some messages from other connections
 for i in {1..100}; do
-  echo "external_$i" | "$CLIENT_BIN" write 127.0.0.1 2>/dev/null
+  echo "external_$i" | "$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT write 2>/dev/null
 done
 
 sleep 1

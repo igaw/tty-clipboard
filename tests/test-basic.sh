@@ -12,13 +12,17 @@ TEST_CONFIG_DIR="$3"
 # Export XDG_CONFIG_HOME for the test
 export XDG_CONFIG_HOME="$TEST_CONFIG_DIR"
 
+# Test configuration
+TEST_IP="127.0.0.2"
+TEST_PORT="15457"
+
 # Test 1: Basic write and read
 echo "Test 1: Basic write and read"
 
 # Start the server in the background
-$SERVER_BIN &
+$SERVER_BIN -b $TEST_IP -p $TEST_PORT &
 SERVER_PID=$!
-echo "Started server with PID: $SERVER_PID"
+echo "Started server with PID: $SERVER_PID on port $TEST_PORT"
 
 # Give the server time to start
 sleep 2
@@ -27,7 +31,7 @@ sleep 2
 TEST_STRING="yolo world"
 
 # Write test string to clipboard
-if echo "$TEST_STRING" | $CLIENT_BIN write 127.0.0.1 2>&1; then
+if echo "$TEST_STRING" | $CLIENT_BIN -s $TEST_IP -p $TEST_PORT write 2>&1; then
     echo "Wrote test string to clipboard"
 else
     echo "Failed to write to clipboard"
@@ -39,7 +43,7 @@ fi
 sleep 1
 
 # Read from clipboard
-RESULT=$($CLIENT_BIN read 127.0.0.1)
+RESULT=$($CLIENT_BIN -s $TEST_IP -p $TEST_PORT read)
 echo "Read from clipboard: $RESULT"
 
 # Verify result
@@ -56,10 +60,10 @@ echo ""
 echo "Test 2: Multiple writes"
 
 TEST_STRING_2="second test string"
-echo "$TEST_STRING_2" | $CLIENT_BIN write 127.0.0.1
+echo "$TEST_STRING_2" | $CLIENT_BIN -s $TEST_IP -p $TEST_PORT write
 sleep 1
 
-RESULT_2=$($CLIENT_BIN read 127.0.0.1)
+RESULT_2=$($CLIENT_BIN -s $TEST_IP -p $TEST_PORT read)
 echo "Read from clipboard: $RESULT_2"
 
 if [ "$RESULT_2" = "$TEST_STRING_2" ]; then
@@ -70,18 +74,18 @@ else
     exit 1
 fi
 
-# Test 3: Sync mode (blocking read)
+# Test 3: Sync mode (blocking read with timeout)
 echo ""
 echo "Test 3: Sync mode (blocking read with timeout)"
 
 # Start a sync read in background with timeout
-timeout 5 $CLIENT_BIN read 127.0.0.1 sync > /tmp/test_sync_output.txt &
+timeout 5 $CLIENT_BIN -s $TEST_IP -p $TEST_PORT read sync > /tmp/test_sync_output.txt &
 SYNC_PID=$!
 sleep 1
 
 # Write new content
 TEST_STRING_3="sync test string"
-echo "$TEST_STRING_3" | $CLIENT_BIN write 127.0.0.1
+echo "$TEST_STRING_3" | $CLIENT_BIN -s $TEST_IP -p $TEST_PORT write
 sleep 1
 
 # Check if sync read got the update

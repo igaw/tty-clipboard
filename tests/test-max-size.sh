@@ -8,6 +8,10 @@ TEST_CONFIG_DIR="$3"
 
 export XDG_CONFIG_HOME="$TEST_CONFIG_DIR"
 
+# Test configuration
+TEST_IP="127.0.0.2"
+TEST_PORT="15457"
+
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]]; then
     kill "$SERVER_PID" 2>/dev/null || true
@@ -20,7 +24,7 @@ trap cleanup EXIT
 MAX="64K" # limit for this test
 
 echo "Starting server with max size $MAX"
-"$SERVER_BIN" --max-size "$MAX" &
+"$SERVER_BIN" -b $TEST_IP -p $TEST_PORT --max-size "$MAX" &
 SERVER_PID=$!
 sleep 2
 
@@ -30,10 +34,10 @@ READ_AFTER_EXACT=$(mktemp)
 head -c $((64 * 1024)) /dev/urandom > "$EXACT"
 
 echo "Writing exact-limit payload ($(stat -c %s "$EXACT") bytes)"
-cat "$EXACT" | "$CLIENT_BIN" write 127.0.0.1
+cat "$EXACT" | "$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT write
 sleep 1
 
-"$CLIENT_BIN" read 127.0.0.1 > "$READ_AFTER_EXACT"
+"$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT read > "$READ_AFTER_EXACT"
 
 SIZE_EXACT=$(stat -c %s "$EXACT")
 SIZE_READ_EXACT=$(stat -c %s "$READ_AFTER_EXACT")
@@ -62,12 +66,12 @@ head -c $((64 * 1024 + 1000)) /dev/urandom > "$OVERSIZE"
 SIZE_OVERSIZE=$(stat -c %s "$OVERSIZE")
 echo "Attempting oversize write ($SIZE_OVERSIZE bytes > 65536)"
 set +e
-cat "$OVERSIZE" | "$CLIENT_BIN" write 127.0.0.1 >/dev/null 2>&1
+cat "$OVERSIZE" | "$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT write >/dev/null 2>&1
 WRITE_RC=$?
 set -e
 sleep 1
 
-"$CLIENT_BIN" read 127.0.0.1 > "$READ_AFTER_OVERSIZE"
+"$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT read > "$READ_AFTER_OVERSIZE"
 SIZE_READ_OVERSIZE=$(stat -c %s "$READ_AFTER_OVERSIZE")
 
 if [[ "$SIZE_READ_OVERSIZE" -ne 65536 ]]; then
