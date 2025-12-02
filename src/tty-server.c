@@ -12,9 +12,15 @@
 #include <getopt.h>
 #include <signal.h>
 #include <pthread.h>
+#include <sys/socket.h>
 #include <arpa/inet.h>
-#include <openssl/ssl.h>
-#include <openssl/err.h>
+#include <mbedtls/version.h>
+#include <mbedtls/net_sockets.h>
+#include <mbedtls/ssl.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/x509.h>
+#include <mbedtls/error.h>
 #include <sys/select.h>
 #include <stdint.h>
 #include <endian.h>
@@ -23,6 +29,44 @@
 #include <protobuf-c/protobuf-c.h>
 #include "clipboard.pb-c.h"
 #pragma GCC diagnostic pop
+
+// Custom send/recv callbacks for mbedTLS that work with raw socket fds
+static int ssl_send_callback(void *ctx, const unsigned char *buf, size_t len)
+{
+	int fd = (int)(intptr_t)ctx;
+	ssize_t ret = send(fd, buf, len, 0);
+	if (ret < 0) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK)
+			return MBEDTLS_ERR_SSL_WANT_WRITE;
+		return MBEDTLS_ERR_NET_SEND_FAILED;
+	}
+	return (int)ret;
+}
+
+static int ssl_recv_callback(void *ctx, unsigned char *buf, size_t len)
+{
+	int fd = (int)(intptr_t)ctx;
+	ssize_t ret = recv(fd, buf, len, 0);
+	if (ret < 0) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK)
+			return MBEDTLS_ERR_SSL_WANT_READ;
+		return MBEDTLS_ERR_NET_RECV_FAILED;
+	}
+	if (ret == 0)
+		return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
+	return (int)ret;
+}
+
+// mbedTLS context structures for server
+typedef struct {
+	mbedtls_ssl_context ssl;
+	mbedtls_ssl_config conf;
+	mbedtls_x509_crt srvcert;
+	mbedtls_x509_crt cacert;
+	mbedtls_pk_context pkey;
+	mbedtls_entropy_context entropy;
+	mbedtls_ctr_drbg_context ctr_drbg;
+} ssl_context_t;
 
 // Shared buffer and mutex (dynamic)
 char *shared_buffer = NULL;
@@ -52,11 +96,9 @@ void handle_sigint(int sig __attribute__((unused)))
 	pthread_mutex_unlock(&buffer_mutex);
 }
 
-SSL_CTX *init_ssl_context()
+ssl_context_t *init_ssl_context()
 {
-	const SSL_METHOD *method;
-	SSL_CTX *ctx;
-
+	int ret;
 	_cleanup_free_ char *path = create_xdg_config_path("tty-clipboard");
 	_cleanup_free_ char *crt = NULL;
 	_cleanup_free_ char *key = NULL;
@@ -77,93 +119,131 @@ SSL_CTX *init_ssl_context()
 		exit(EXIT_FAILURE);
 	}
 
-	// Initialize OpenSSL library
-	SSL_library_init();
-	OpenSSL_add_all_algorithms();
-	SSL_load_error_strings();
-	LOG_DEBUG("OpenSSL library initialized");
+	ssl_context_t *ssl_ctx = calloc(1, sizeof(ssl_context_t));
+	if (!ssl_ctx) {
+		perror("Unable to allocate SSL context");
+		exit(EXIT_FAILURE);
+	}
 
-	// Choose the method for SSL/TLS
-	method = TLS_server_method();
-	ctx = SSL_CTX_new(method);
-	if (!ctx) {
-		LOG_ERROR("Unable to create SSL context");
-		perror("Unable to create SSL context");
-		ERR_print_errors_fp(stderr);
-		exit(EXIT_FAILURE);
-	}
-	LOG_DEBUG("SSL context created");
+	// Initialize mbedTLS structures
+	mbedtls_ssl_init(&ssl_ctx->ssl);
+	mbedtls_ssl_config_init(&ssl_ctx->conf);
+	mbedtls_x509_crt_init(&ssl_ctx->srvcert);
+	mbedtls_x509_crt_init(&ssl_ctx->cacert);
+	mbedtls_pk_init(&ssl_ctx->pkey);
+	mbedtls_entropy_init(&ssl_ctx->entropy);
+	mbedtls_ctr_drbg_init(&ssl_ctx->ctr_drbg);
 
-	// Load the server's certificate and private key
-	LOG_DEBUG("Loading server certificate from %s", crt);
-	if (SSL_CTX_use_certificate_file(ctx, crt, SSL_FILETYPE_PEM) <= 0) {
-		LOG_ERROR("Unable to load server certificate from %s", crt);
-		perror("Unable to load certificate");
-		ERR_print_errors_fp(stderr);
+	LOG_DEBUG("mbedTLS structures initialized");
+
+	// Seed the RNG
+	const char *pers = "tty_clipboard_server";
+	ret = mbedtls_ctr_drbg_seed(&ssl_ctx->ctr_drbg, mbedtls_entropy_func,
+				    &ssl_ctx->entropy,
+				    (const unsigned char *)pers, strlen(pers));
+	if (ret != 0) {
+		LOG_ERROR("mbedtls_ctr_drbg_seed failed: -0x%04x", -ret);
+		fprintf(stderr, "mbedtls_ctr_drbg_seed failed: -0x%04x\n", -ret);
 		exit(EXIT_FAILURE);
 	}
-	LOG_DEBUG("Loading server private key from %s", key);
-	if (SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM) <= 0) {
-		LOG_ERROR("Unable to load server private key from %s", key);
-		perror("Unable to load private key");
-		ERR_print_errors_fp(stderr);
-		exit(EXIT_FAILURE);
-	}
+	LOG_DEBUG("RNG initialized");
 
 	// Load the CA certificate for client verification
 	LOG_DEBUG("Loading CA certificate from %s", ca);
-	if (SSL_CTX_load_verify_locations(ctx, ca, NULL) <= 0) {
-		LOG_ERROR("Unable to load CA certificate from %s", ca);
-		perror("Unable to load CA certificate");
-		ERR_print_errors_fp(stderr);
+	ret = mbedtls_x509_crt_parse_file(&ssl_ctx->cacert, ca);
+	if (ret != 0) {
+		LOG_ERROR("Unable to load CA certificate from %s: -0x%04x", ca, -ret);
+		fprintf(stderr, "Unable to load CA certificate: -0x%04x\n", -ret);
 		exit(EXIT_FAILURE);
 	}
 
-	// Set the server to verify the client's certificate
-	SSL_CTX_set_verify(
-		ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+	// Load the server certificate
+	LOG_DEBUG("Loading server certificate from %s", crt);
+	ret = mbedtls_x509_crt_parse_file(&ssl_ctx->srvcert, crt);
+	if (ret != 0) {
+		LOG_ERROR("Unable to load server certificate from %s: -0x%04x", crt, -ret);
+		fprintf(stderr, "Unable to load server certificate: -0x%04x\n", -ret);
+		exit(EXIT_FAILURE);
+	}
+
+	// Load the server private key
+	LOG_DEBUG("Loading server private key from %s", key);
+#ifdef MBEDTLS_3X
+	ret = mbedtls_pk_parse_keyfile(&ssl_ctx->pkey, key, NULL,
+				      mbedtls_ctr_drbg_random, &ssl_ctx->ctr_drbg);
+#else
+	ret = mbedtls_pk_parse_keyfile(&ssl_ctx->pkey, key, NULL);
+#endif
+	if (ret != 0) {
+		LOG_ERROR("Unable to load server private key from %s: -0x%04x", key, -ret);
+		fprintf(stderr, "Unable to load server private key: -0x%04x\n", -ret);
+		exit(EXIT_FAILURE);
+	}
+
+	// Configure SSL/TLS defaults for server
+	ret = mbedtls_ssl_config_defaults(&ssl_ctx->conf,
+					  MBEDTLS_SSL_IS_SERVER,
+					  MBEDTLS_SSL_TRANSPORT_STREAM,
+					  MBEDTLS_SSL_PRESET_DEFAULT);
+	if (ret != 0) {
+		LOG_ERROR("mbedtls_ssl_config_defaults failed: -0x%04x", -ret);
+		fprintf(stderr, "mbedtls_ssl_config_defaults failed: -0x%04x\n", -ret);
+		exit(EXIT_FAILURE);
+	}
+	LOG_DEBUG("SSL config initialized with defaults");
+
+	// Set RNG callback
+	mbedtls_ssl_conf_rng(&ssl_ctx->conf, mbedtls_ctr_drbg_random, &ssl_ctx->ctr_drbg);
+
+	// Set CA certificate for client verification
+	mbedtls_ssl_conf_ca_chain(&ssl_ctx->conf, &ssl_ctx->cacert, NULL);
+
+	// Set server certificate and private key
+	ret = mbedtls_ssl_conf_own_cert(&ssl_ctx->conf, &ssl_ctx->srvcert, &ssl_ctx->pkey);
+	if (ret != 0) {
+		LOG_ERROR("mbedtls_ssl_conf_own_cert failed: -0x%04x", -ret);
+		fprintf(stderr, "mbedtls_ssl_conf_own_cert failed: -0x%04x\n", -ret);
+		exit(EXIT_FAILURE);
+	}
+
+	// Require and verify client certificates
+	mbedtls_ssl_conf_authmode(&ssl_ctx->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
 	LOG_DEBUG("SSL context configured with certificates");
 
-	return ctx;
+	return ssl_ctx;
 }
 
-static int ssl_read_all(SSL *ssl, void *buf, size_t len)
+static int ssl_read_all(mbedtls_ssl_context *ssl, void *buf, size_t len)
 {
 	unsigned char *p = buf;
 	size_t total = 0;
 	while (total < len) {
-		int r = SSL_read(ssl, p + total, (int)(len - total));
-		if (r <= 0) {
-			int err = SSL_get_error(ssl, r);
-			if (err == SSL_ERROR_WANT_READ ||
-			    err == SSL_ERROR_WANT_WRITE)
-				continue;
+		int r = mbedtls_ssl_read(ssl, p + total, len - total);
+		if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
+			continue;
+		if (r <= 0)
 			return -1;
-		}
 		total += (size_t)r;
 	}
 	return 0;
 }
 
-static int ssl_write_all(SSL *ssl, const void *buf, size_t len)
+static int ssl_write_all(mbedtls_ssl_context *ssl, const void *buf, size_t len)
 {
 	const unsigned char *p = buf;
 	size_t total = 0;
 	while (total < len) {
-		int w = SSL_write(ssl, p + total, (int)(len - total));
-		if (w <= 0) {
-			int err = SSL_get_error(ssl, w);
-			if (err == SSL_ERROR_WANT_READ ||
-			    err == SSL_ERROR_WANT_WRITE)
-				continue;
+		int w = mbedtls_ssl_write(ssl, p + total, len - total);
+		if (w == MBEDTLS_ERR_SSL_WANT_READ || w == MBEDTLS_ERR_SSL_WANT_WRITE)
+			continue;
+		if (w <= 0)
 			return -1;
-		}
 		total += (size_t)w;
 	}
 	return 0;
 }
 
-static int send_protobuf_response(SSL *ssl, Ttycb__Envelope *resp)
+static int send_protobuf_response(mbedtls_ssl_context *ssl, Ttycb__Envelope *resp)
 {
 	size_t outsz = ttycb__envelope__get_packed_size(resp);
 	unsigned char *outbuf = malloc(outsz);
@@ -182,7 +262,7 @@ static int send_protobuf_response(SSL *ssl, Ttycb__Envelope *resp)
 	return result;
 }
 
-static int handle_write_request(SSL *ssl, Ttycb__WriteRequest *write_req)
+static int handle_write_request(mbedtls_ssl_context *ssl, Ttycb__WriteRequest *write_req)
 {
 	size_t len = write_req->data.len;
 	const unsigned char *data = write_req->data.data;
@@ -237,7 +317,7 @@ static int handle_write_request(SSL *ssl, Ttycb__WriteRequest *write_req)
 	return send_protobuf_response(ssl, &resp);
 }
 
-static int handle_read_request(SSL *ssl)
+static int handle_read_request(mbedtls_ssl_context *ssl)
 {
 	LOG_DEBUG("Read request received");
 	pthread_mutex_lock(&buffer_mutex);
@@ -269,7 +349,7 @@ static int handle_read_request(SSL *ssl)
 	return result;
 }
 
-static int handle_subscribe_request(SSL *ssl, Ttycb__SubscribeRequest *sub_req)
+static int handle_subscribe_request(mbedtls_ssl_context *ssl, Ttycb__SubscribeRequest *sub_req)
 {
 	(void)sub_req; // Unused for now, but client_id could be used for filtering
 
@@ -326,12 +406,12 @@ static int handle_subscribe_request(SSL *ssl, Ttycb__SubscribeRequest *sub_req)
 	return 0;
 }
 
-static Ttycb__Envelope *receive_envelope(SSL *ssl, int *error)
+static Ttycb__Envelope *receive_envelope(mbedtls_ssl_context *ssl, int *error)
 {
 	*error = 0;
 
 	uint64_t be_len = 0;
-	int rr = SSL_read(ssl, &be_len, sizeof(be_len));
+	int rr = mbedtls_ssl_read(ssl, (unsigned char *)&be_len, sizeof(be_len));
 	if (rr <= 0) {
 		*error = 1;
 		return NULL;
@@ -367,7 +447,7 @@ static Ttycb__Envelope *receive_envelope(SSL *ssl, int *error)
 // Protobuf client handler
 void *client_handler(void *arg)
 {
-	SSL *ssl = (SSL *)arg;
+	mbedtls_ssl_context *ssl = (mbedtls_ssl_context *)arg;
 
 	while (!terminate) {
 		int error = 0;
@@ -399,16 +479,16 @@ void *client_handler(void *arg)
 			break;
 	}
 
-	if (SSL_shutdown(ssl) == 0)
-		SSL_shutdown(ssl);
-	SSL_free(ssl);
+	mbedtls_ssl_close_notify(ssl);
+	mbedtls_ssl_free(ssl);
+	free(ssl);
 	pthread_exit(NULL);
 }
 
 struct server_args {
 	int port;
 	const char *bind_addr;
-	SSL_CTX *ctx;
+	ssl_context_t *ctx;
 };
 
 static int create_server_socket(int port, const char *bind_addr)
@@ -502,50 +582,78 @@ static int accept_client_connection(int server_fd)
 	return client_fd;
 }
 
-static SSL *setup_client_ssl(SSL_CTX *ctx, int client_fd)
+static mbedtls_ssl_context *setup_client_ssl(ssl_context_t *ctx, int client_fd)
 {
-	// Create SSL structure for the accepted connection
-	SSL *ssl = SSL_new(ctx);
-	SSL_set_fd(ssl, client_fd);
-
-	// Perform SSL/TLS handshake
-	if (SSL_accept(ssl) <= 0) {
-		printf("SSL handshake failed\n");
-		ERR_print_errors_fp(stderr);
-		SSL_free(ssl);
+	int ret;
+	// Allocate a new SSL context for this client
+	mbedtls_ssl_context *ssl = calloc(1, sizeof(mbedtls_ssl_context));
+	if (!ssl) {
+		perror("Unable to allocate SSL context for client");
 		close(client_fd);
 		return NULL;
+	}
+
+	mbedtls_ssl_init(ssl);
+
+	// Setup the SSL context with the server's configuration
+	ret = mbedtls_ssl_setup(ssl, &ctx->conf);
+	if (ret != 0) {
+		LOG_ERROR("mbedtls_ssl_setup failed: -0x%04x", -ret);
+		fprintf(stderr, "mbedtls_ssl_setup failed: -0x%04x\n", -ret);
+		mbedtls_ssl_free(ssl);
+		free(ssl);
+		close(client_fd);
+		return NULL;
+	}
+
+	// Set the socket for the SSL session
+	// Use custom callbacks that work with raw socket fds
+	mbedtls_ssl_set_bio(ssl, (void *)(intptr_t)client_fd,
+			    ssl_send_callback, ssl_recv_callback, NULL);
+
+	// Perform SSL/TLS handshake
+	while ((ret = mbedtls_ssl_handshake(ssl)) != 0) {
+		if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+			LOG_ERROR("SSL handshake failed: -0x%04x", -ret);
+			fprintf(stderr, "SSL handshake failed: -0x%04x\n", -ret);
+			mbedtls_ssl_free(ssl);
+			free(ssl);
+			close(client_fd);
+			return NULL;
+		}
 	}
 
 	return ssl;
 }
 
-static int verify_client_certificate(SSL *ssl)
+static int verify_client_certificate(mbedtls_ssl_context *ssl)
 {
 	// Verify client certificate
-	X509 *cert = SSL_get_peer_certificate(ssl);
+	const mbedtls_x509_crt *cert = mbedtls_ssl_get_peer_cert(ssl);
 	if (cert == NULL) {
 		printf("Client certificate not provided\n");
 		return -1;
 	}
-	X509_free(cert);
 
-	long verify_result = SSL_get_verify_result(ssl);
-	if (verify_result != X509_V_OK) {
-		printf("Certificate verification failed: %ld\n", verify_result);
+	uint32_t flags = mbedtls_ssl_get_verify_result(ssl);
+	if (flags != 0) {
+		char vrfy_buf[512];
+		mbedtls_x509_crt_verify_info(vrfy_buf, sizeof(vrfy_buf), "  ! ", flags);
+		printf("Certificate verification failed:\n%s\n", vrfy_buf);
 		return -1;
 	}
 
 	return 0;
 }
 
-static void spawn_client_handler(SSL *ssl, int client_fd)
+static void spawn_client_handler(mbedtls_ssl_context *ssl, int client_fd)
 {
 	pthread_t client_thread;
 	if (pthread_create(&client_thread, NULL, client_handler, (void *)ssl) !=
 	    0) {
 		perror("Failed to create client thread");
-		SSL_free(ssl);
+		mbedtls_ssl_free(ssl);
+		free(ssl);
 		close(client_fd);
 		return;
 	}
@@ -568,14 +676,15 @@ static void *start_server(void *data)
 			continue; // Timeout or error, try again
 
 		// Setup SSL for client
-		SSL *ssl = setup_client_ssl(args->ctx, client_fd);
+		mbedtls_ssl_context *ssl = setup_client_ssl(args->ctx, client_fd);
 		if (!ssl)
 			continue;
 
 		// Verify client certificate
 		if (verify_client_certificate(ssl) < 0) {
-			SSL_shutdown(ssl);
-			SSL_free(ssl);
+			mbedtls_ssl_close_notify(ssl);
+			mbedtls_ssl_free(ssl);
+			free(ssl);
 			close(client_fd);
 			continue;
 		}
@@ -804,7 +913,7 @@ int main(int argc, char *argv[])
 
 	// Initialize SSL context
 	LOG_INFO("Initializing SSL context");
-	SSL_CTX *ctx = init_ssl_context();
+	ssl_context_t *ctx = init_ssl_context();
 	struct server_args args = { .port = server_port, .bind_addr = bind_addr, .ctx = ctx };
 
 	// Start server thread
@@ -818,7 +927,14 @@ int main(int argc, char *argv[])
 
 	pthread_join(server_thread, NULL);
 
-	SSL_CTX_free(ctx);
+	// Clean up SSL context
+	mbedtls_ssl_config_free(&ctx->conf);
+	mbedtls_x509_crt_free(&ctx->srvcert);
+	mbedtls_x509_crt_free(&ctx->cacert);
+	mbedtls_pk_free(&ctx->pkey);
+	mbedtls_entropy_free(&ctx->entropy);
+	mbedtls_ctr_drbg_free(&ctx->ctr_drbg);
+	free(ctx);
 	free(shared_buffer);
 	return 0;
 }

@@ -8,6 +8,15 @@ config_conf.set_quoted('LICENSE', meson.project_license()[0])
 # _GNU_SOURCE provides: asprintf, be64toh, htobe64, sigaction, etc.
 config_conf.set('_GNU_SOURCE', '1', description: 'Enable GNU extensions including POSIX features')
 
+# Set mbedTLS version for API compatibility
+if mbedtls_major >= 3
+  config_conf.set('MBEDTLS_3X', '1', description: 'Using mbedTLS 3.x API')
+  message('Using mbedTLS 3.x API')
+else
+  config_conf.set('MBEDTLS_2X', '1', description: 'Using mbedTLS 2.x API')
+  message('Using mbedTLS 2.x API')
+endif
+
 config_h = configure_file(
   output: 'config.h',
   configuration: config_conf
@@ -34,7 +43,7 @@ pb_lib = static_library('protobuf-gen',
 server_sources = ['tty-server.c', 'tty-clipboard.c', config_h]
 client_sources = ['tty-client.c', 'tty-clipboard.c', config_h]
 
-common_deps = [openssl_dep, protobuf_dep]
+common_deps = [mbedtls_dep, mbedx509_dep, mbedcrypto_dep, protobuf_dep]
 common_link_with = [pb_lib]
 
 cb_server = executable('tty-cb-server', server_sources,
