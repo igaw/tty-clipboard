@@ -27,6 +27,15 @@
 // Forward declaration to avoid implicit declaration warnings
 void handle_error(const char *msg);
 
+// Helper to print mbedTLS errors
+static void print_mbedtls_error(const char *context, int errcode)
+{
+	char error_buf[100];
+	mbedtls_strerror(errcode, error_buf, sizeof(error_buf));
+	LOG_ERROR("%s: -0x%04x (%s)", context, -errcode, error_buf);
+	fprintf(stderr, "%s: -0x%04x (%s)\n", context, -errcode, error_buf);
+}
+
 // Custom send/recv callbacks for mbedTLS that work with raw socket fds
 static int ssl_send_callback(void *ctx, const unsigned char *buf, size_t len)
 {
@@ -204,9 +213,11 @@ ssl_context_t *init_ssl_context()
 	// Load the client private key
 	LOG_DEBUG("Loading client private key from %s", key);
 #ifdef MBEDTLS_3X
+	// mbedTLS 3.x requires RNG parameters
 	ret = mbedtls_pk_parse_keyfile(&ssl_ctx->pkey, key, NULL,
 				      mbedtls_ctr_drbg_random, &ssl_ctx->ctr_drbg);
 #else
+	// mbedTLS 2.x uses simpler API
 	ret = mbedtls_pk_parse_keyfile(&ssl_ctx->pkey, key, NULL);
 #endif
 	if (ret != 0) {
@@ -359,8 +370,7 @@ static int connect_to_server(const char *server_ip, int port, ssl_context_t *ssl
 	LOG_DEBUG("Performing SSL handshake");
 	while ((ret = mbedtls_ssl_handshake(&ssl_ctx->ssl)) != 0) {
 		if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-			LOG_ERROR("SSL handshake failed: -0x%04x", -ret);
-			fprintf(stderr, "SSL handshake failed: -0x%04x\n", -ret);
+			print_mbedtls_error("SSL handshake failed", ret);
 			close(sock);
 			exit(EXIT_FAILURE);
 		}
