@@ -153,202 +153,227 @@ static int ssl_write_all(SSL *ssl, const void *buf, size_t len)
 	return 0;
 }
 
+static int send_protobuf_response(SSL *ssl, Ttycb__Envelope *resp)
+{
+	size_t outsz = ttycb__envelope__get_packed_size(resp);
+	unsigned char *outbuf = malloc(outsz);
+	if (!outbuf)
+		return -1;
+	
+	ttycb__envelope__pack(resp, outbuf);
+	uint64_t pfx = htobe64((uint64_t)outsz);
+	
+	int result = 0;
+	if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 ||
+	    ssl_write_all(ssl, outbuf, outsz) < 0)
+		result = -1;
+	
+	free(outbuf);
+	return result;
+}
+
+static int handle_write_request(SSL *ssl, Ttycb__WriteRequest *write_req)
+{
+	size_t len = write_req->data.len;
+	const unsigned char *data = write_req->data.data;
+	int oversize = (max_buffer_size && len > max_buffer_size);
+	
+	if (oversize) {
+		int ok = (oversize_policy == OVERSIZE_DROP);
+		Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
+		Ttycb__WriteResponse wr = TTYCB__WRITE_RESPONSE__INIT;
+		wr.ok = ok;
+		if (!ok)
+			wr.message = (char *)"oversize";
+		wr.message_id = 0; // No message_id for rejected writes
+		resp.write_resp = &wr;
+		resp.body_case = TTYCB__ENVELOPE__BODY_WRITE_RESP;
+		return send_protobuf_response(ssl, &resp);
+	}
+	
+	// Store the data
+	pthread_mutex_lock(&buffer_mutex);
+	if (len > shared_capacity) {
+		char *nbuf = realloc(shared_buffer, len);
+		if (!nbuf) {
+			pthread_mutex_unlock(&buffer_mutex);
+			return -1;
+		}
+		shared_buffer = nbuf;
+		shared_capacity = len;
+	}
+	memcpy(shared_buffer, data, len);
+	shared_length = len;
+	uint64_t msg_id = next_message_id++;
+	shared_message_id = msg_id;
+	gen++;
+	pthread_cond_broadcast(&buffer_cond);
+	pthread_mutex_unlock(&buffer_mutex);
+	
+	// Send success response
+	Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
+	Ttycb__WriteResponse wr = TTYCB__WRITE_RESPONSE__INIT;
+	wr.ok = 1;
+	wr.message_id = msg_id;
+	resp.write_resp = &wr;
+	resp.body_case = TTYCB__ENVELOPE__BODY_WRITE_RESP;
+	return send_protobuf_response(ssl, &resp);
+}
+
+static int handle_read_request(SSL *ssl)
+{
+	pthread_mutex_lock(&buffer_mutex);
+	size_t len = shared_length;
+	Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
+	Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
+	df.data.len = len;
+	df.data.data = (uint8_t *)shared_buffer;
+	resp.data = &df;
+	resp.body_case = TTYCB__ENVELOPE__BODY_DATA;
+	
+	size_t outsz = ttycb__envelope__get_packed_size(&resp);
+	unsigned char *outbuf = malloc(outsz);
+	if (!outbuf) {
+		pthread_mutex_unlock(&buffer_mutex);
+		return -1;
+	}
+	ttycb__envelope__pack(&resp, outbuf);
+	pthread_mutex_unlock(&buffer_mutex);
+	
+	uint64_t pfx = htobe64((uint64_t)outsz);
+	int result = 0;
+	if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 ||
+	    ssl_write_all(ssl, outbuf, outsz) < 0)
+		result = -1;
+	
+	free(outbuf);
+	return result;
+}
+
+static int handle_subscribe_request(SSL *ssl, Ttycb__SubscribeRequest *sub_req)
+{
+	(void)sub_req; // Unused for now, but client_id could be used for filtering
+	
+	pthread_mutex_lock(&buffer_mutex);
+	unsigned int seen = gen; // Start from current generation
+	uint64_t last_sent_message_id = shared_message_id;
+	pthread_mutex_unlock(&buffer_mutex);
+	
+	while (!terminate) {
+		pthread_mutex_lock(&buffer_mutex);
+		while (seen == gen && !terminate)
+			pthread_cond_wait(&buffer_cond, &buffer_mutex);
+		if (terminate) {
+			pthread_mutex_unlock(&buffer_mutex);
+			break;
+		}
+		seen = gen;
+		
+		// Skip if we've already sent this message to this subscriber
+		if (shared_message_id == last_sent_message_id) {
+			pthread_mutex_unlock(&buffer_mutex);
+			continue;
+		}
+		
+		size_t len = shared_length;
+		uint64_t msg_id = shared_message_id;
+		last_sent_message_id = msg_id;
+		
+		Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
+		Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
+		df.data.len = len;
+		df.data.data = (uint8_t *)shared_buffer;
+		df.message_id = msg_id;
+		resp.data = &df;
+		resp.body_case = TTYCB__ENVELOPE__BODY_DATA;
+		
+		size_t outsz = ttycb__envelope__get_packed_size(&resp);
+		unsigned char *outbuf = malloc(outsz);
+		if (!outbuf) {
+			pthread_mutex_unlock(&buffer_mutex);
+			return -1;
+		}
+		ttycb__envelope__pack(&resp, outbuf);
+		pthread_mutex_unlock(&buffer_mutex);
+		
+		uint64_t pfx = htobe64((uint64_t)outsz);
+		if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 ||
+		    ssl_write_all(ssl, outbuf, outsz) < 0) {
+			free(outbuf);
+			return -1;
+		}
+		free(outbuf);
+	}
+	return 0;
+}
+
+static Ttycb__Envelope *receive_envelope(SSL *ssl, int *error)
+{
+	*error = 0;
+	
+	uint64_t be_len = 0;
+	int rr = SSL_read(ssl, &be_len, sizeof(be_len));
+	if (rr <= 0) {
+		*error = 1;
+		return NULL;
+	}
+	
+	size_t mlen = (size_t)be64toh(be_len);
+	if (mlen == 0)
+		return NULL; // Skip empty message, not an error
+	
+	unsigned char *mbuf = malloc(mlen);
+	if (!mbuf) {
+		*error = 1;
+		return NULL;
+	}
+	
+	if (ssl_read_all(ssl, mbuf, mlen) < 0) {
+		free(mbuf);
+		*error = 1;
+		return NULL;
+	}
+	
+	Ttycb__Envelope *env = ttycb__envelope__unpack(NULL, mlen, mbuf);
+	free(mbuf);
+	
+	if (!env) {
+		printf("Failed to unpack envelope\n");
+		*error = 1;
+	}
+	
+	return env;
+}
+
 // Protobuf client handler
 void *client_handler(void *arg)
 {
 	SSL *ssl = (SSL *)arg;
 
-	// Protobuf envelope handler
 	while (!terminate) {
-		// Read envelope frame
-		uint64_t be_len = 0;
-		int rr = SSL_read(ssl, &be_len, sizeof(be_len));
-		if (rr <= 0)
-			break;
-		size_t mlen = (size_t)be64toh(be_len);
-		if (mlen == 0)
-			continue;
-		unsigned char *mbuf = malloc(mlen);
-		if (!mbuf)
-			break;
-		if (ssl_read_all(ssl, mbuf, mlen) < 0) {
-			free(mbuf);
-			break;
-		}
-		Ttycb__Envelope *env =
-			ttycb__envelope__unpack(NULL, mlen, mbuf);
-		free(mbuf);
+		int error = 0;
+		Ttycb__Envelope *env = receive_envelope(ssl, &error);
 		if (!env) {
-			printf("Failed to unpack envelope\n");
-			break;
+			if (error || terminate)
+				break;
+			continue; // Empty message, continue loop
 		}
 
-		// Handle message types
-		if (env->body_case == TTYCB__ENVELOPE__BODY_WRITE &&
-		    env->write) {
-			size_t len = env->write->data.len;
-			const unsigned char *data = env->write->data.data;
-			int oversize =
-				(max_buffer_size && len > max_buffer_size);
-			if (oversize) {
-				int ok = (oversize_policy == OVERSIZE_DROP);
-				// Update nothing
-				Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
-				Ttycb__WriteResponse wr =
-					TTYCB__WRITE_RESPONSE__INIT;
-				wr.ok = ok;
-				if (!ok)
-					wr.message = (char *)"oversize";
-				wr.message_id =
-					0; // No message_id for rejected writes
-				resp.write_resp = &wr;
-				resp.body_case =
-					TTYCB__ENVELOPE__BODY_WRITE_RESP;
-				size_t outsz =
-					ttycb__envelope__get_packed_size(&resp);
-				unsigned char *outbuf = malloc(outsz);
-				if (!outbuf) {
-					ttycb__envelope__free_unpacked(env,
-								       NULL);
-					break;
-				}
-				ttycb__envelope__pack(&resp, outbuf);
-				uint64_t pfx = htobe64((uint64_t)outsz);
-				if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 ||
-				    ssl_write_all(ssl, outbuf, outsz) < 0) {
-					free(outbuf);
-					ttycb__envelope__free_unpacked(env,
-								       NULL);
-					break;
-				}
-				free(outbuf);
-				ttycb__envelope__free_unpacked(env, NULL);
-				continue;
-			}
-			// store
-			pthread_mutex_lock(&buffer_mutex);
-			if (len > shared_capacity) {
-				char *nbuf = realloc(shared_buffer, len);
-				if (!nbuf) {
-					pthread_mutex_unlock(&buffer_mutex);
-					ttycb__envelope__free_unpacked(env,
-								       NULL);
-					break;
-				}
-				shared_buffer = nbuf;
-				shared_capacity = len;
-			}
-			memcpy(shared_buffer, data, len);
-			shared_length = len;
-			uint64_t msg_id = next_message_id++;
-			shared_message_id = msg_id;
-			gen++;
-			pthread_cond_broadcast(&buffer_cond);
-			pthread_mutex_unlock(&buffer_mutex);
-			// reply ok
-			Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
-			Ttycb__WriteResponse wr = TTYCB__WRITE_RESPONSE__INIT;
-			wr.ok = 1;
-			wr.message_id = msg_id;
-			resp.write_resp = &wr;
-			resp.body_case = TTYCB__ENVELOPE__BODY_WRITE_RESP;
-			size_t outsz = ttycb__envelope__get_packed_size(&resp);
-			unsigned char *outbuf = malloc(outsz);
-			if (!outbuf) {
-				ttycb__envelope__free_unpacked(env, NULL);
-				break;
-			}
-			ttycb__envelope__pack(&resp, outbuf);
-			uint64_t pfx = htobe64((uint64_t)outsz);
-			if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 ||
-			    ssl_write_all(ssl, outbuf, outsz) < 0) {
-				free(outbuf);
-				ttycb__envelope__free_unpacked(env, NULL);
-				break;
-			}
-			free(outbuf);
-		} else if (env->body_case == TTYCB__ENVELOPE__BODY_READ &&
-			   env->read) {
-			pthread_mutex_lock(&buffer_mutex);
-			size_t len = shared_length;
-			Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
-			Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
-			df.data.len = len;
-			df.data.data = (uint8_t *)shared_buffer;
-			resp.data = &df;
-			resp.body_case = TTYCB__ENVELOPE__BODY_DATA;
-			size_t outsz = ttycb__envelope__get_packed_size(&resp);
-			unsigned char *outbuf = malloc(outsz);
-			if (!outbuf) {
-				pthread_mutex_unlock(&buffer_mutex);
-				ttycb__envelope__free_unpacked(env, NULL);
-				break;
-			}
-			ttycb__envelope__pack(&resp, outbuf);
-			pthread_mutex_unlock(&buffer_mutex);
-			uint64_t pfx = htobe64((uint64_t)outsz);
-			if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 ||
-			    ssl_write_all(ssl, outbuf, outsz) < 0) {
-				free(outbuf);
-				ttycb__envelope__free_unpacked(env, NULL);
-				break;
-			}
-			free(outbuf);
-		} else if (env->body_case == TTYCB__ENVELOPE__BODY_SUBSCRIBE &&
-			   env->subscribe) {
-			pthread_mutex_lock(&buffer_mutex);
-			unsigned int seen =
-				gen; // Start from current generation to only receive future updates
-			uint64_t last_sent_message_id =
-				shared_message_id; // Track last message_id sent to this subscriber
-			pthread_mutex_unlock(&buffer_mutex);
-			while (!terminate) {
-				pthread_mutex_lock(&buffer_mutex);
-				while (seen == gen && !terminate)
-					pthread_cond_wait(&buffer_cond,
-							  &buffer_mutex);
-				if (terminate) {
-					pthread_mutex_unlock(&buffer_mutex);
-					break;
-				}
-				seen = gen;
-				// Skip if we've already sent this message to this subscriber
-				if (shared_message_id == last_sent_message_id) {
-					pthread_mutex_unlock(&buffer_mutex);
-					continue;
-				}
-				size_t len = shared_length;
-				uint64_t msg_id = shared_message_id;
-				last_sent_message_id = msg_id;
-				Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
-				Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
-				df.data.len = len;
-				df.data.data = (uint8_t *)shared_buffer;
-				df.message_id = msg_id;
-				resp.data = &df;
-				resp.body_case = TTYCB__ENVELOPE__BODY_DATA;
-				size_t outsz =
-					ttycb__envelope__get_packed_size(&resp);
-				unsigned char *outbuf = malloc(outsz);
-				if (!outbuf) {
-					pthread_mutex_unlock(&buffer_mutex);
-					break;
-				}
-				ttycb__envelope__pack(&resp, outbuf);
-				pthread_mutex_unlock(&buffer_mutex);
-				uint64_t pfx = htobe64((uint64_t)outsz);
-				if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 ||
-				    ssl_write_all(ssl, outbuf, outsz) < 0) {
-					free(outbuf);
-					break;
-				}
-				free(outbuf);
-			}
-		} else {
-			// Unknown: ignore
+		int result = 0;
+		if (env->body_case == TTYCB__ENVELOPE__BODY_WRITE && env->write) {
+			result = handle_write_request(ssl, env->write);
+		} else if (env->body_case == TTYCB__ENVELOPE__BODY_READ && env->read) {
+			result = handle_read_request(ssl);
+		} else if (env->body_case == TTYCB__ENVELOPE__BODY_SUBSCRIBE && env->subscribe) {
+			result = handle_subscribe_request(ssl, env->subscribe);
 		}
+		
 		ttycb__envelope__free_unpacked(env, NULL);
+		
+		if (result < 0)
+			break;
 	}
+	
 	if (SSL_shutdown(ssl) == 0)
 		SSL_shutdown(ssl);
 	SSL_free(ssl);
