@@ -24,23 +24,24 @@ endif
 
 # Configure and build mbedTLS using cmake directly
 # 1) Initialize submodules in the source dir (no-op if already present)
-# 2) Copy custom config overlay to build dir
+# 2) Enable PSA Crypto and TLS 1.3 using mbedTLS's config script (matching Fedora configuration)
 # 3) Configure inside the subproject build dir (cmake-build)
 # 4) Build static libs and copy them next to this meson subproject build dir
-custom_config_overlay = join_paths(meson.current_source_dir(), 'tty_clipboard_mbedtls_config.h')
 mbedtls_build = custom_target('mbedtls-configure',
   output: ['libmbedtls.a', 'libmbedx509.a', 'libmbedcrypto.a'],
   command: [
     'sh', '-c',
-    ('src="@0@"; bld="@1@"; overlay="@2@"; '
+    ('src="@0@"; bld="@1@"; '
      + '(cd "$src" && git submodule update --init 2>/dev/null || true) && '
-     + 'mkdir -p "$bld/cmake-build" && '
-     + 'cp "$overlay" "$bld/cmake-build/mbedtls_config_overlay.h" && '
-     + 'cd "$bld/cmake-build" && '
-    + 'cmake "$src" -DCMAKE_BUILD_TYPE=Release -DENABLE_PROGRAMS=OFF -DENABLE_TESTING=OFF -DUSE_SHARED_LIBS=OFF -DMBEDTLS_FATAL_WARNINGS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DMBEDTLS_CONFIG_FILE=\\"mbedtls_config_overlay.h\\"@3@ && '
+     + 'cd "$src" && python3 scripts/config.py set MBEDTLS_PSA_CRYPTO_CONFIG && '
+     + 'python3 scripts/config.py set MBEDTLS_USE_PSA_CRYPTO && '
+     + 'python3 scripts/config.py set MBEDTLS_PSA_CRYPTO_C && '
+     + 'python3 scripts/config.py set MBEDTLS_SSL_PROTO_TLS1_3 && '
+     + 'mkdir -p "$bld/cmake-build" && cd "$bld/cmake-build" && '
+    + 'cmake "$src" -DCMAKE_BUILD_TYPE=Release -DENABLE_PROGRAMS=OFF -DENABLE_TESTING=OFF -DUSE_SHARED_LIBS=OFF -DMBEDTLS_FATAL_WARNINGS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON@2@ && '
      + 'make -j"$(nproc)" mbedtls mbedx509 mbedcrypto && '
      + 'cp library/libmbedtls.a library/libmbedx509.a library/libmbedcrypto.a "$bld"')
-    .format(source_root, build_root, custom_config_overlay, cmake_cflags_arg)
+    .format(source_root, build_root, cmake_cflags_arg)
   ],
   build_by_default: true,
   console: true
