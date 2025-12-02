@@ -1,152 +1,333 @@
 # tty-clipboard Wire Protocol
 
-This document describes the on-the-wire framing between `tty-cb-client` and `tty-cb-server` over a mutually authenticated TLS (OpenSSL) connection.
+This document describes the Protocol Buffers-based wire protocol between `tty-cb-client` and `tty-cb-server` over a mutually authenticated TLS (OpenSSL) connection.
 
 ## Transport Layer
 - **Security:** TLS with mutual (client + server) X.509 certificate authentication.
 - **Port:** Single TCP port (`SERVER_PORT`, default 5457) for all operations.
-- **Reliability:** Stream (TCP); protocol adds minimal framing for message delineation.
+- **Reliability:** Stream (TCP); protocol uses length-prefixed envelope framing.
+- **Encoding:** Protocol Buffers (proto3) with envelope-based message framing.
 
 ## High-Level Flow
 1. TCP connect
 2. TLS handshake (mutual auth) – connection aborted on certificate failure
-3. Client sends a single ASCII command line: `read`, `write`, or `read_blocked` followed by `\n`.
-4. Server dispatches handler based on command.
-5. Handler-specific message exchange (described below).
-6. Connection ends (server side initiates graceful shutdown after response or client may close after consuming data). For `read_blocked`, connection persists sending multiple updates until terminated by signal or disconnect.
+3. Client sends protobuf `Envelope` message containing a request (`WriteRequest`, `ReadRequest`, or `SubscribeRequest`)
+4. Server processes the request and responds with appropriate `Envelope` messages
+5. For write/read operations: single request-response exchange, then connection closes
+6. For subscribe operations: server streams `DataFrame` messages until client disconnects or server terminates
 
-## Commands
-| Command        | Direction | Purpose                                  |
-|----------------|-----------|------------------------------------------|
-| `write`        | C → S     | Upload clipboard content                 |
-| `read`         | C → S     | Fetch current clipboard content          |
-| `read_blocked` | C → S     | Stream updates whenever clipboard changes|
+## Protocol Buffer Schema
 
-Maximum command length accepted: `CMD_MAX_LEN` (currently 32 bytes). Unknown commands are ignored and connection closed.
-- **Status Byte (Write Acknowledgement):** 1 byte following a write payload:
-  - `0x00`: Success (clipboard updated)
-  - `0x01`: Failure (oversize rejection, memory allocation error, or discard policy triggered)
+The protocol uses a single `Envelope` message type with a `oneof` body to multiplex different message types over the same connection:
 
-## Message Framing Per Operation
-### WRITE
+```protobuf
+message Envelope {
+  oneof body {
+    WriteRequest write = 1;
+    ReadRequest read = 2;
+    SubscribeRequest subscribe = 3;
+    WriteResponse write_resp = 4;
+    DataFrame data = 5;
+    Error error = 6;
+  }
+}
+```
+
+### Message Types
+
+**WriteRequest** - Upload clipboard content
+```protobuf
+message WriteRequest {
+  bytes data = 1;           // Raw clipboard data (any binary content)
+  uint64 client_id = 2;     // Client identifier (currently unused, reserved for future features)
+}
+```
+
+**WriteResponse** - Write acknowledgement
+```protobuf
+message WriteResponse {
+  bool ok = 1;              // true = success, false = failure
+  string message = 2;       // Error description (e.g., "oversize")
+  uint64 message_id = 3;    // Server-assigned unique message ID (0 if rejected)
+}
+```
+
+**ReadRequest** - Fetch current clipboard content
+```protobuf
+message ReadRequest {}      // Empty message
+```
+
+**SubscribeRequest** - Stream clipboard updates
+```protobuf
+message SubscribeRequest {
+  uint64 client_id = 1;     // Client identifier (currently unused, reserved for future features)
+}
+```
+
+**DataFrame** - Clipboard data response
+```protobuf
+message DataFrame {
+  bytes data = 1;           // Raw clipboard data
+  uint64 message_id = 2;    // Unique message ID assigned by server
+}
+```
+
+**Error** - Error response (currently unused but reserved)
+```protobuf
+message Error {
+  int32 code = 1;           // Error code
+  string message = 2;       // Error description
+}
+```
+
+## Envelope Framing
+
+Each `Envelope` message is transmitted with a length prefix:
+
+```
++------------------+----------------------+
+| Length Prefix    | Envelope (protobuf)  |
+| 8 bytes (BE u64) | N bytes              |
++------------------+----------------------+
+```
+
+- **Length prefix:** 64-bit big-endian unsigned integer specifying envelope size in bytes
+- **Envelope:** Serialized protobuf `Envelope` message
+
+Reading procedure:
+1. Read 8 bytes for length prefix
+2. Convert from big-endian: `size = be64toh(prefix)`
+3. Read exactly `size` bytes
+4. Deserialize as protobuf `Envelope`
+
+Writing procedure:
+1. Serialize `Envelope` to buffer
+2. Convert size to big-endian: `prefix = htobe64(size)`
+3. Write 8-byte prefix
+4. Write serialized envelope
+
+## Message Exchange Patterns
+
+### WRITE Operation
 ```
 Client → Server:
-+----------------+----------------------+--------------+-----------------+
-| Length Prefix  | Payload (raw bytes)  | (no trailing | (any binary)    |
-| 8 bytes BE     | N bytes              | sentinel)    |                 |
-+----------------+----------------------+--------------+-----------------+
+  Envelope { write: WriteRequest { data, client_id } }
 
 Server → Client:
-+-------------+
-| Status Byte |
-| 0x00 or 0x01|
-+-------------+
+  Envelope { write_resp: WriteResponse { ok, message, message_id } }
 ```
-Notes:
-- Server reads prefix, then the exact number of payload bytes.
-- Oversize handling depends on policy (see below).
-- No further data are sent after the status byte for this command.
 
-### READ
+**Success:** `ok = true`, `message_id` contains server-assigned ID
+**Failure:** `ok = false`, `message` explains reason (e.g., "oversize"), `message_id = 0`
+
+Server increments global `message_id` counter on successful writes.
+
+### READ Operation
 ```
 Client → Server:
-(command line already sent)
+  Envelope { read: ReadRequest {} }
 
 Server → Client:
-+----------------+----------------------+ 
-| Length Prefix  | Payload (raw bytes)  |
-| 8 bytes BE     | N bytes (may be 0)   |
-+----------------+----------------------+ 
+  Envelope { data: DataFrame { data, message_id } }
 ```
-If length is `0`, no payload bytes follow.
 
-### READ_BLOCKED
-Initial response identical to a single READ; followed by zero or more update frames whenever the clipboard changes:
+Returns current clipboard content with its associated `message_id`.
+
+### SUBSCRIBE Operation
 ```
-Server → Client (repeats):
-+----------------+----------------------+ 
-| Length Prefix  | Payload (raw bytes)  |
-| 8 bytes BE     | N bytes (may be 0)   |
-+----------------+----------------------+ 
+Client → Server:
+  Envelope { subscribe: SubscribeRequest { client_id } }
+
+Server → Client (stream):
+  Envelope { data: DataFrame { data, message_id } }
+  Envelope { data: DataFrame { data, message_id } }
+  ... (repeats on each clipboard update)
 ```
-Termination conditions:
-- Client disconnects
-- Server receives termination signal (SIGINT) and broadcasts shutdown
+
+Server tracks subscriber's `last_sent_message_id` to avoid sending duplicate updates.
+Stream continues until client disconnects or server receives termination signal (SIGINT).
+
+## Message ID System
+
+The server maintains a global `message_id` counter (starts at 1) to provide unique identifiers for clipboard updates:
+
+- **Write operations:** Server assigns `message_id = next_message_id++` and stores in `shared_message_id`
+- **Subscribe mode:** Each subscriber tracks `last_sent_message_id` locally
+- **Duplicate prevention:** Server skips sending `DataFrame` if `shared_message_id == last_sent_message_id` for that subscriber
+- **Content independence:** `message_id` increments on every write, even if content is identical
+
+Benefits:
+- Prevents infinite echo loops in distributed systems
+- Allows clients to detect missed updates
+- Enables future features like message acknowledgment, replay, or conflict resolution
 
 ## Oversize Policy
-Configured via `--max-size <limit>` and `--oversize-policy <reject|drop>`.
-- **max-size = 0:** Unlimited.
-- **reject:** Server discards incoming payload bytes, then sends status `0x01` (clipboard unchanged). Client exits non-zero.
-- **drop:** Server discards incoming payload bytes, sends status `0x00` ONLY if discard succeeded? (Implementation currently sends `0x00` for successful discard, `0x01` if discard failed). Client treats it as success; clipboard unchanged.
 
-### Discard Procedure
-For oversize payloads the server:
-1. Reads and ignores payload in fixed chunks (64 KiB).
-2. After all bytes consumed (or failure), sends status byte.
-3. Returns to normal shutdown logic.
+Configured via `--max-size <limit>` and `--oversize-policy <reject|drop>`:
+
+- **max-size = 0:** Unlimited clipboard size
+- **reject policy:** Server rejects write, sends `WriteResponse { ok: false, message: "oversize", message_id: 0 }`
+- **drop policy:** Server accepts but discards write, sends `WriteResponse { ok: true, message_id: 0 }` (clipboard unchanged)
+
+When `max_buffer_size` is exceeded:
+1. Server checks policy
+2. For reject: immediately responds with failure, doesn't update clipboard
+3. For drop: responds with success but doesn't update clipboard
+4. Neither increments `message_id` counter
+
+## Concurrency & Synchronization
+
+- **Global buffer:** Single shared clipboard protected by `pthread_mutex`
+- **Generation counter:** `gen` increments on successful writes, triggers `pthread_cond_broadcast`
+- **Subscribe mode:** Each subscriber thread waits on condition variable for `gen` changes
+- **Message ID tracking:** Per-subscriber `last_sent_message_id` prevents duplicate sends
+- **Broadcast wakeup:** All subscribers receive updates using `pthread_cond_broadcast` (not `signal`)
+
+## Client Roles
+
+The client supports multiple operational modes:
+
+| Role              | Description                                      |
+|-------------------|--------------------------------------------------|
+| `write`           | Write stdin to clipboard, exit                   |
+| `read`            | Read clipboard to stdout once, exit              |
+| `read_blocked`    | Subscribe to updates, stream to stdout           |
+| `write_read`      | Write stdin then immediately read back           |
+| `write_subscribe` | Write stdin then subscribe (for testing)         |
 
 ## Error Handling
-Server-sent failure for write (`status = 0x01`) occurs for:
-- Oversize with reject policy
-- Allocation failure for temporary buffer
-- Failure while discarding oversize data (I/O error) even under drop policy
-- Failure reading the declared payload
 
-Reads (`read` / `read_blocked`) do not have a status byte; failure modes cause connection closure. Client should treat unexpected EOF before full prefix/payload as error.
+**Write failures:**
+- Oversize with reject policy: `ok = false`, `message = "oversize"`
+- Memory allocation failure: Server breaks connection
+- Protocol errors: Connection closed without response
 
-## Endianness
-- Length prefix is big-endian (`htobe64` / `be64toh`). Cross-platform safe.
+**Read/Subscribe failures:**
+- Malformed envelope: Connection closed
+- SSL errors: Connection terminated
+- Server shutdown: Clean `DataFrame` stream termination
 
-## Concurrency & Ordering
-- Server uses a generation counter (`gen`) incremented after successful write storage.
-- `read_blocked` waits until `gen` changes and then emits a new frame.
-- Frames are atomic at the TLS record/application level: client must always read exactly 8 bytes for prefix before reading payload.
+Clients should detect:
+- Unexpected EOF (incomplete envelope)
+- Protobuf deserialization failures
+- `ok = false` in `WriteResponse`
 
 ## Empty Payloads
-- Length prefix `0` is allowed (clipboard empty). For writes: accepted and clipboard becomes empty, status `0x00`.
 
-## Client Responsibilities
-- Send command line terminated by `\n`.
-- For writes: after sending prefix + payload, read 1 status byte. Non-zero → exit failure.
-- For read_blocked: loop reading frames until connection closes; ignore zero-length frames.
+- `data` field can be empty (0 bytes) representing empty clipboard
+- Empty clipboard is valid state and transmits normally
+- Write of empty data: accepted, `ok = true`, clipboard cleared
+
+## Client Implementation Notes
+
+**Sending messages:**
+```c
+1. Initialize Envelope structure
+2. Pack envelope: ttycb__envelope__pack()
+3. Convert size to big-endian
+4. SSL_write() length prefix (8 bytes)
+5. SSL_write() packed envelope
+```
+
+**Receiving messages:**
+```c
+1. SSL_read() 8 bytes for length
+2. Convert from big-endian: be64toh()
+3. Allocate buffer
+4. SSL_read() exact envelope size
+5. Unpack: ttycb__envelope__unpack()
+6. Process based on body case
+7. Free: ttycb__envelope__free_unpacked()
+```
 
 ## Security Considerations
-- Mutual TLS prevents unauthenticated use.
-- Max size + oversize policy mitigate memory DoS.
-- Dropping oversize still consumes network bandwidth; `reject` conserves some server-side CPU after initial discard.
+
+- **Mutual TLS:** Both client and server certificates required, verified on connection
+- **Memory safety:** Protobuf library handles bounds checking during deserialization
+- **DoS mitigation:** `max_buffer_size` limits memory consumption per write
+- **No command injection:** Binary protocol eliminates string parsing vulnerabilities
+- **Client ID:** Currently unused; reserved for future authentication/authorization features
+
+## Advantages Over Classic Protocol
+
+1. **Binary safety:** No null-byte truncation issues
+2. **Structured data:** Type-safe message encoding
+3. **Extensibility:** Easy to add new fields without breaking compatibility
+4. **Message IDs:** Built-in update tracking and loop prevention
+5. **Clear semantics:** Request/response pattern with explicit success/failure
+6. **Future-proof:** Reserved fields for authentication, compression, metadata
 
 ## Extensibility
-Potential reserved future additions:
-- Multi-byte status block (e.g., reason codes, server metrics)
-- Compression flag (bitmap preceding length prefix)
-- Streaming chunk framing (multiple payload segments per write)
 
-Backwards compatibility strategy:
-- Any extension should use a capability negotiation command or reserve high bits in status byte (e.g., `0x80` set indicates extended status follows).
+Future enhancements can leverage protobuf's backward compatibility:
 
-## Example Hex Transcript
-Write 5 bytes `hello` (ASCII):
+**Potential additions:**
+- Compression flag in `WriteRequest`
+- Clipboard metadata (MIME type, timestamp, source application)
+- Client authentication tokens in `client_id` or new field
+- Multi-clipboard support (clipboard name/ID field)
+- Transactional semantics (message acknowledgment)
+- Partial reads (offset + length in `ReadRequest`)
+
+**Compatibility strategy:**
+- Unknown fields are ignored by older clients (proto3 behavior)
+- New message types can be added to `Envelope.oneof`
+- Clients check `body` case before processing
+- Version negotiation could use reserved `Error` message on mismatch
+
+## Example Message Flow
+
+**Write 5 bytes "hello":**
 ```
-Client→Server: "write\n"
-Client→Server: 00 00 00 00 00 00 00 05 68 65 6c 6c 6f
-Server→Client: 00
+Client → Server:
+  [8-byte BE length: 0x000000000000000B]
+  Envelope { write: WriteRequest { data: "hello", client_id: 0x1234567890ABCDEF } }
+
+Server → Client:
+  [8-byte BE length: 0x0000000000000008]
+  Envelope { write_resp: WriteResponse { ok: true, message: "", message_id: 42 } }
 ```
-Read after write:
+
+**Read clipboard:**
 ```
-Client→Server: "read\n"
-Server→Client: 00 00 00 00 00 00 00 05 68 65 6c 6c 6f
+Client → Server:
+  [8-byte BE length: 0x0000000000000002]
+  Envelope { read: ReadRequest {} }
+
+Server → Client:
+  [8-byte BE length: 0x000000000000000A]
+  Envelope { data: DataFrame { data: "hello", message_id: 42 } }
 ```
-Oversize reject (limit 4, payload 5):
+
+**Subscribe to updates:**
 ```
-Client→Server: "write\n"
-Client→Server: 00 00 00 00 00 00 00 05 68 65 6c 6c 6f
-Server discards 5 bytes
-Server→Client: 01
+Client → Server:
+  [8-byte BE length: 0x0000000000000008]
+  Envelope { subscribe: SubscribeRequest { client_id: 0x1234567890ABCDEF } }
+
+Server → Client (stream):
+  [8-byte BE length: 0x000000000000000A]
+  Envelope { data: DataFrame { data: "hello", message_id: 42 } }
+  
+  ... (waits for clipboard update) ...
+  
+  [8-byte BE length: 0x000000000000000B]
+  Envelope { data: DataFrame { data: "world", message_id: 43 } }
+  
+  ... (continues until disconnect) ...
 ```
-Client exits failure.
 
 ## Versioning
-Protocol changes should increment software version (`VERSION` macro) and update this document. Consider adding a `--protocol-version` option for scripting.
+
+Protocol changes should:
+1. Increment software version (`VERSION` macro)
+2. Update this document
+3. Add new fields as optional (proto3 default behavior)
+4. Consider protocol version field if breaking changes needed
+
+Current implementation: Protobuf-only (classic TLV protocol removed as of v1.x)
 
 ---
-Generated: 2025-12-01
+**Schema:** proto/clipboard.proto  
+**Generated:** 2025-12-02  
+**Protocol:** Protobuf v3 with envelope framing
