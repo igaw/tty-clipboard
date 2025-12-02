@@ -184,12 +184,260 @@ static void print_version(void)
 	printf("License: %s\n", LICENSE);
 }
 
+static void setup_signal_handler(void)
+{
+	struct sigaction sa;
+	sa.sa_handler = handle_sigint;
+	sa.sa_flags = 0;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGINT, &sa, NULL);
+}
+
+static uint64_t generate_client_id(void)
+{
+	uint64_t client_id;
+	if (RAND_bytes((unsigned char *)&client_id, sizeof(client_id)) != 1) {
+		fprintf(stderr, "Failed to generate client_id\n");
+		exit(EXIT_FAILURE);
+	}
+	if (client_id == 0)
+		client_id = 1; // ensure non-zero
+	return client_id;
+}
+
+static SSL *connect_to_server(const char *server_ip, int port, SSL_CTX *ctx,
+			       int *sock_fd)
+{
+	// Create socket and connect to server
+	int sock = socket(AF_INET, SOCK_STREAM, 0);
+	if (sock < 0) {
+		perror("Socket creation failed");
+		exit(EXIT_FAILURE);
+	}
+
+	struct sockaddr_in server_address;
+	memset(&server_address, 0, sizeof(server_address));
+	server_address.sin_family = AF_INET;
+	server_address.sin_port = htons(port);
+	inet_pton(AF_INET, server_ip, &server_address.sin_addr);
+
+	// Create SSL object and establish SSL connection
+	SSL *ssl = SSL_new(ctx);
+	SSL_set_fd(ssl, sock);
+	if (connect(sock, (struct sockaddr *)&server_address,
+		    sizeof(server_address)) < 0) {
+		perror("Connection failed");
+		exit(EXIT_FAILURE);
+	}
+
+	// Perform SSL handshake
+	if (SSL_connect(ssl) <= 0) {
+		perror("SSL connection failed");
+		ERR_print_errors_fp(stderr);
+		SSL_free(ssl);
+		close(sock);
+		exit(EXIT_FAILURE);
+	}
+
+	// Verify the server's certificate
+	long verify_result = SSL_get_verify_result(ssl);
+	if (verify_result != X509_V_OK) {
+		fprintf(stderr, "Server certificate verification failed: %ld\n",
+			verify_result);
+		SSL_free(ssl);
+		close(sock);
+		exit(EXIT_FAILURE);
+	}
+
+	*sock_fd = sock;
+	return ssl;
+}
+
+static uint8_t *read_stdin_to_buffer(size_t *out_size)
+{
+	size_t cap = 4096, used = 0;
+	uint8_t *buf = malloc(cap);
+	if (!buf)
+		handle_error("malloc");
+	while (1) {
+		if (used == cap) {
+			cap *= 2;
+			uint8_t *t = realloc(buf, cap);
+			if (!t)
+				handle_error("realloc");
+			buf = t;
+		}
+		ssize_t r = read(STDIN_FILENO, buf + used, cap - used);
+		if (r < 0)
+			handle_error("read");
+		if (r == 0)
+			break;
+		used += (size_t)r;
+	}
+	*out_size = used;
+	return buf;
+}
+
+static void do_write(SSL *ssl, uint64_t client_id, SSL_CTX *ctx, int sock)
+{
+	size_t used;
+	uint8_t *buf = read_stdin_to_buffer(&used);
+
+	Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
+	Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT;
+	wr.data.data = buf;
+	wr.data.len = used;
+	wr.client_id = client_id;
+	env.write = &wr;
+	env.body_case = TTYCB__ENVELOPE__BODY_WRITE;
+	pb_send_envelope(ssl, &env);
+	free(buf);
+
+	Ttycb__Envelope *resp = pb_recv_envelope(ssl);
+	if (!resp || resp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP ||
+	    !resp->write_resp || !resp->write_resp->ok) {
+		ttycb__envelope__free_unpacked(resp, NULL);
+		fprintf(stderr, "Write failed\n");
+		SSL_free(ssl);
+		close(sock);
+		SSL_CTX_free(ctx);
+		exit(EXIT_FAILURE);
+	}
+	ttycb__envelope__free_unpacked(resp, NULL);
+}
+
+static void do_read(SSL *ssl, SSL_CTX *ctx, int sock)
+{
+	Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
+	Ttycb__ReadRequest rd = TTYCB__READ_REQUEST__INIT;
+	env.read = &rd;
+	env.body_case = TTYCB__ENVELOPE__BODY_READ;
+	pb_send_envelope(ssl, &env);
+
+	Ttycb__Envelope *resp = pb_recv_envelope(ssl);
+	if (!resp || resp->body_case != TTYCB__ENVELOPE__BODY_DATA ||
+	    !resp->data) {
+		ttycb__envelope__free_unpacked(resp, NULL);
+		fprintf(stderr, "Read failed\n");
+		SSL_free(ssl);
+		close(sock);
+		SSL_CTX_free(ctx);
+		exit(EXIT_FAILURE);
+	}
+	fwrite(resp->data->data.data, 1, resp->data->data.len, stdout);
+	fflush(stdout);
+	ttycb__envelope__free_unpacked(resp, NULL);
+}
+
+static void do_write_read(SSL *ssl, uint64_t client_id, SSL_CTX *ctx, int sock)
+{
+	size_t used;
+	uint8_t *buf = read_stdin_to_buffer(&used);
+
+	Ttycb__Envelope envw = TTYCB__ENVELOPE__INIT;
+	Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT;
+	wr.data.data = buf;
+	wr.data.len = used;
+	wr.client_id = client_id;
+	envw.write = &wr;
+	envw.body_case = TTYCB__ENVELOPE__BODY_WRITE;
+	pb_send_envelope(ssl, &envw);
+
+	Ttycb__Envelope *wresp = pb_recv_envelope(ssl);
+	if (!wresp || wresp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP ||
+	    !wresp->write_resp || !wresp->write_resp->ok) {
+		ttycb__envelope__free_unpacked(wresp, NULL);
+		fprintf(stderr, "Write failed\n");
+		SSL_free(ssl);
+		close(sock);
+		SSL_CTX_free(ctx);
+		exit(EXIT_FAILURE);
+	}
+	ttycb__envelope__free_unpacked(wresp, NULL);
+	free(buf);
+
+	Ttycb__Envelope envr = TTYCB__ENVELOPE__INIT;
+	Ttycb__ReadRequest rd = TTYCB__READ_REQUEST__INIT;
+	envr.read = &rd;
+	envr.body_case = TTYCB__ENVELOPE__BODY_READ;
+	pb_send_envelope(ssl, &envr);
+
+	Ttycb__Envelope *rresp = pb_recv_envelope(ssl);
+	if (!rresp || rresp->body_case != TTYCB__ENVELOPE__BODY_DATA ||
+	    !rresp->data) {
+		ttycb__envelope__free_unpacked(rresp, NULL);
+		fprintf(stderr, "Read failed\n");
+		SSL_free(ssl);
+		close(sock);
+		SSL_CTX_free(ctx);
+		exit(EXIT_FAILURE);
+	}
+	fwrite(rresp->data->data.data, 1, rresp->data->data.len, stdout);
+	fflush(stdout);
+	ttycb__envelope__free_unpacked(rresp, NULL);
+}
+
+static void do_subscribe(SSL *ssl, uint64_t client_id)
+{
+	Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
+	Ttycb__SubscribeRequest sub = TTYCB__SUBSCRIBE_REQUEST__INIT;
+	sub.client_id = client_id;
+	env.subscribe = &sub;
+	env.body_case = TTYCB__ENVELOPE__BODY_SUBSCRIBE;
+	pb_send_envelope(ssl, &env);
+
+	// Loop receiving data frames until connection closes or terminate signal
+	while (!terminate) {
+		Ttycb__Envelope *resp = pb_recv_envelope(ssl);
+		if (!resp)
+			break; // connection closed
+		if (resp->body_case == TTYCB__ENVELOPE__BODY_DATA &&
+		    resp->data) {
+			fwrite(resp->data->data.data, 1,
+			       resp->data->data.len, stdout);
+			fflush(stdout);
+		}
+		ttycb__envelope__free_unpacked(resp, NULL);
+	}
+}
+
+static void do_write_subscribe(SSL *ssl, uint64_t client_id, SSL_CTX *ctx,
+				int sock)
+{
+	size_t used;
+	uint8_t *buf = read_stdin_to_buffer(&used);
+
+	Ttycb__Envelope envw = TTYCB__ENVELOPE__INIT;
+	Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT;
+	wr.data.data = buf;
+	wr.data.len = used;
+	wr.client_id = client_id;
+	envw.write = &wr;
+	envw.body_case = TTYCB__ENVELOPE__BODY_WRITE;
+	pb_send_envelope(ssl, &envw);
+
+	Ttycb__Envelope *wresp = pb_recv_envelope(ssl);
+	if (!wresp || wresp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP ||
+	    !wresp->write_resp || !wresp->write_resp->ok) {
+		ttycb__envelope__free_unpacked(wresp, NULL);
+		fprintf(stderr, "Write failed\n");
+		SSL_free(ssl);
+		close(sock);
+		SSL_CTX_free(ctx);
+		exit(EXIT_FAILURE);
+	}
+	ttycb__envelope__free_unpacked(wresp, NULL);
+	free(buf);
+
+	// Now subscribe
+	do_subscribe(ssl, client_id);
+}
+
 int main(int argc, char *argv[])
 {
-	int opt;
 	const char *role = NULL;
 	const char *server_ip = NULL;
-	uint64_t client_id = 0; // used to prevent sync loops
+	int opt;
 
 	static struct option long_options[] = { { "help", no_argument, 0, 'h' },
 						{ "version", no_argument, 0,
@@ -233,279 +481,35 @@ int main(int argc, char *argv[])
 	}
 
 	// Set up signal handling
-	struct sigaction sa;
-	sa.sa_handler = handle_sigint;
-	sa.sa_flags = 0;
-	sigemptyset(&sa.sa_mask);
-	sigaction(SIGINT, &sa, NULL);
+	setup_signal_handler();
 
 	// Generate a random non-zero client_id
-	if (RAND_bytes((unsigned char *)&client_id, sizeof(client_id)) != 1) {
-		fprintf(stderr, "Failed to generate client_id\n");
-		exit(EXIT_FAILURE);
-	}
-	if (client_id == 0)
-		client_id = 1; // ensure non-zero
+	uint64_t client_id = generate_client_id();
 
-	int server_port = SERVER_PORT;
-
+	// Initialize SSL context
 	SSL_CTX *ctx = init_ssl_context();
 
-	// Create socket and connect to server
-	int sock = socket(AF_INET, SOCK_STREAM, 0);
-	if (sock < 0) {
-		perror("Socket creation failed");
-		exit(EXIT_FAILURE);
-	}
+	// Connect to server
+	int sock;
+	SSL *ssl = connect_to_server(server_ip, SERVER_PORT, ctx, &sock);
 
-	struct sockaddr_in server_address;
-	memset(&server_address, 0, sizeof(server_address));
-	server_address.sin_family = AF_INET;
-	server_address.sin_port = htons(server_port);
-	inet_pton(AF_INET, server_ip, &server_address.sin_addr);
-
-	// Create SSL object and establish SSL connection
-	SSL *ssl = SSL_new(ctx);
-	SSL_set_fd(ssl, sock);
-	if (connect(sock, (struct sockaddr *)&server_address,
-		    sizeof(server_address)) < 0) {
-		perror("Connection failed");
-		exit(EXIT_FAILURE);
-	}
-
-	// Perform SSL handshake
-	if (SSL_connect(ssl) <= 0) {
-		perror("SSL connection failed");
-		ERR_print_errors_fp(stderr);
-		SSL_free(ssl);
-		close(sock);
-		exit(EXIT_FAILURE);
-	}
-
-	// Verify the server's certificate
-	long verify_result = SSL_get_verify_result(ssl);
-	if (verify_result != X509_V_OK) {
-		fprintf(stderr, "Server certificate verification failed: %ld\n",
-			verify_result);
-		SSL_free(ssl);
-		close(sock);
-		SSL_CTX_free(ctx);
-		exit(EXIT_FAILURE);
-	}
-
-	// Protobuf protocol
+	// Execute the requested role
 	if (strcmp(role, "write") == 0) {
-		// Read stdin
-		size_t cap = 4096, used = 0;
-		uint8_t *buf = malloc(cap);
-		if (!buf)
-			handle_error("malloc");
-		while (1) {
-			if (used == cap) {
-				cap *= 2;
-				uint8_t *t = realloc(buf, cap);
-				if (!t)
-					handle_error("realloc");
-				buf = t;
-			}
-			ssize_t r = read(STDIN_FILENO, buf + used, cap - used);
-			if (r < 0)
-				handle_error("read");
-			if (r == 0)
-				break;
-			used += (size_t)r;
-		}
-		Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
-		Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT;
-		wr.data.data = buf;
-		wr.data.len = used;
-		wr.client_id = client_id;
-		env.write = &wr;
-		env.body_case = TTYCB__ENVELOPE__BODY_WRITE;
-		pb_send_envelope(ssl, &env);
-		free(buf);
-		Ttycb__Envelope *resp = pb_recv_envelope(ssl);
-		if (!resp ||
-		    resp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP ||
-		    !resp->write_resp || !resp->write_resp->ok) {
-			ttycb__envelope__free_unpacked(resp, NULL);
-			fprintf(stderr, "Write failed\n");
-			SSL_free(ssl);
-			close(sock);
-			SSL_CTX_free(ctx);
-			exit(EXIT_FAILURE);
-		}
-		ttycb__envelope__free_unpacked(resp, NULL);
+		do_write(ssl, client_id, ctx, sock);
 	} else if (strcmp(role, "read") == 0) {
-		Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
-		Ttycb__ReadRequest rd = TTYCB__READ_REQUEST__INIT;
-		env.read = &rd;
-		env.body_case = TTYCB__ENVELOPE__BODY_READ;
-		pb_send_envelope(ssl, &env);
-		Ttycb__Envelope *resp = pb_recv_envelope(ssl);
-		if (!resp || resp->body_case != TTYCB__ENVELOPE__BODY_DATA ||
-		    !resp->data) {
-			ttycb__envelope__free_unpacked(resp, NULL);
-			fprintf(stderr, "Read failed\n");
-			SSL_free(ssl);
-			close(sock);
-			SSL_CTX_free(ctx);
-			exit(EXIT_FAILURE);
-		}
-		fwrite(resp->data->data.data, 1, resp->data->data.len, stdout);
-		fflush(stdout);
-		ttycb__envelope__free_unpacked(resp, NULL);
+		do_read(ssl, ctx, sock);
 	} else if (strcmp(role, "write_read") == 0) {
-		// Write stdin then read back
-		size_t cap = 4096, used = 0;
-		uint8_t *buf = malloc(cap);
-		if (!buf)
-			handle_error("malloc");
-		while (1) {
-			if (used == cap) {
-				cap *= 2;
-				uint8_t *t = realloc(buf, cap);
-				if (!t)
-					handle_error("realloc");
-				buf = t;
-			}
-			ssize_t r = read(STDIN_FILENO, buf + used, cap - used);
-			if (r < 0)
-				handle_error("read");
-			if (r == 0)
-				break;
-			used += (size_t)r;
-		}
-		Ttycb__Envelope envw = TTYCB__ENVELOPE__INIT;
-		Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT;
-		wr.data.data = buf;
-		wr.data.len = used;
-		wr.client_id = client_id;
-		envw.write = &wr;
-		envw.body_case = TTYCB__ENVELOPE__BODY_WRITE;
-		pb_send_envelope(ssl, &envw);
-		Ttycb__Envelope *wresp = pb_recv_envelope(ssl);
-		if (!wresp ||
-		    wresp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP ||
-		    !wresp->write_resp || !wresp->write_resp->ok) {
-			ttycb__envelope__free_unpacked(wresp, NULL);
-			fprintf(stderr, "Write failed\n");
-			SSL_free(ssl);
-			close(sock);
-			SSL_CTX_free(ctx);
-			exit(EXIT_FAILURE);
-		}
-		ttycb__envelope__free_unpacked(wresp, NULL);
-		free(buf);
-		Ttycb__Envelope envr = TTYCB__ENVELOPE__INIT;
-		Ttycb__ReadRequest rd = TTYCB__READ_REQUEST__INIT;
-		envr.read = &rd;
-		envr.body_case = TTYCB__ENVELOPE__BODY_READ;
-		pb_send_envelope(ssl, &envr);
-		Ttycb__Envelope *rresp = pb_recv_envelope(ssl);
-		if (!rresp || rresp->body_case != TTYCB__ENVELOPE__BODY_DATA ||
-		    !rresp->data) {
-			ttycb__envelope__free_unpacked(rresp, NULL);
-			fprintf(stderr, "Read failed\n");
-			SSL_free(ssl);
-			close(sock);
-			SSL_CTX_free(ctx);
-			exit(EXIT_FAILURE);
-		}
-		fwrite(rresp->data->data.data, 1, rresp->data->data.len,
-		       stdout);
-		fflush(stdout);
-		ttycb__envelope__free_unpacked(rresp, NULL);
+		do_write_read(ssl, client_id, ctx, sock);
 	} else if (strcmp(role, "read_blocked") == 0) {
-		// Subscribe mode - receive updates as they come
-		Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
-		Ttycb__SubscribeRequest sub = TTYCB__SUBSCRIBE_REQUEST__INIT;
-		sub.client_id = client_id;
-		env.subscribe = &sub;
-		env.body_case = TTYCB__ENVELOPE__BODY_SUBSCRIBE;
-		pb_send_envelope(ssl, &env);
-		// Loop receiving data frames until connection closes or terminate signal
-		while (!terminate) {
-			Ttycb__Envelope *resp = pb_recv_envelope(ssl);
-			if (!resp)
-				break; // connection closed
-			if (resp->body_case == TTYCB__ENVELOPE__BODY_DATA &&
-			    resp->data) {
-				fwrite(resp->data->data.data, 1,
-				       resp->data->data.len, stdout);
-				fflush(stdout);
-			}
-			ttycb__envelope__free_unpacked(resp, NULL);
-		}
+		do_subscribe(ssl, client_id);
 	} else if (strcmp(role, "write_subscribe") == 0) {
-		// Write stdin, then subscribe for future updates (testing loopback prevention)
-		size_t cap = 4096, used = 0;
-		uint8_t *buf = malloc(cap);
-		if (!buf)
-			handle_error("malloc");
-		while (1) {
-			if (used == cap) {
-				cap *= 2;
-				uint8_t *t = realloc(buf, cap);
-				if (!t)
-					handle_error("realloc");
-				buf = t;
-			}
-			ssize_t r = read(STDIN_FILENO, buf + used, cap - used);
-			if (r < 0)
-				handle_error("read");
-			if (r == 0)
-				break;
-			used += (size_t)r;
-		}
-		Ttycb__Envelope envw = TTYCB__ENVELOPE__INIT;
-		Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT;
-		wr.data.data = buf;
-		wr.data.len = used;
-		wr.client_id = client_id;
-		envw.write = &wr;
-		envw.body_case = TTYCB__ENVELOPE__BODY_WRITE;
-		pb_send_envelope(ssl, &envw);
-		Ttycb__Envelope *wresp = pb_recv_envelope(ssl);
-		if (!wresp ||
-		    wresp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP ||
-		    !wresp->write_resp || !wresp->write_resp->ok) {
-			ttycb__envelope__free_unpacked(wresp, NULL);
-			fprintf(stderr, "Write failed\n");
-			SSL_free(ssl);
-			close(sock);
-			SSL_CTX_free(ctx);
-			exit(EXIT_FAILURE);
-		}
-		ttycb__envelope__free_unpacked(wresp, NULL);
-		free(buf);
-		// Now subscribe
-		Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
-		Ttycb__SubscribeRequest sub = TTYCB__SUBSCRIBE_REQUEST__INIT;
-		sub.client_id = client_id;
-		env.subscribe = &sub;
-		env.body_case = TTYCB__ENVELOPE__BODY_SUBSCRIBE;
-		pb_send_envelope(ssl, &env);
-		while (!terminate) {
-			Ttycb__Envelope *resp = pb_recv_envelope(ssl);
-			if (!resp)
-				break;
-			if (resp->body_case == TTYCB__ENVELOPE__BODY_DATA &&
-			    resp->data) {
-				fwrite(resp->data->data.data, 1,
-				       resp->data->data.len, stdout);
-				fflush(stdout);
-			}
-			ttycb__envelope__free_unpacked(resp, NULL);
-		}
+		do_write_subscribe(ssl, client_id, ctx, sock);
 	}
 
 	// Initiate graceful shutdown after all data is sent
 	if (SSL_shutdown(ssl) == 0) {
 		// The first call to SSL_shutdown() sends a close_notify alert to the server
-		if (SSL_shutdown(ssl) == 1) {
-			// printf("Connection shutdown successfully.\n");
-		}
+		SSL_shutdown(ssl);
 	}
 
 	// Clean up

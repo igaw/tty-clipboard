@@ -359,12 +359,10 @@ struct server_args {
 	SSL_CTX *ctx;
 };
 
-static void *start_server(void *data)
+static int create_server_socket(int port)
 {
-	struct server_args *args = data;
-	int server_fd, client_fd;
+	int server_fd;
 	struct sockaddr_in address;
-	int addrlen = sizeof(address);
 
 	// Create server socket
 	if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
@@ -383,7 +381,7 @@ static void *start_server(void *data)
 
 	address.sin_family = AF_INET;
 	address.sin_addr.s_addr = INADDR_ANY;
-	address.sin_port = htons(args->port);
+	address.sin_port = htons(port);
 
 	// Bind the socket
 	if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
@@ -397,95 +395,131 @@ static void *start_server(void *data)
 		exit(EXIT_FAILURE);
 	}
 
-	printf("Server listening on port %d...\n", args->port);
+	printf("Server listening on port %d...\n", port);
+	return server_fd;
+}
+
+static int accept_client_connection(int server_fd)
+{
+	struct sockaddr_in address;
+	int addrlen = sizeof(address);
+	int client_fd;
+
+	fd_set readfds;
+	FD_ZERO(&readfds);
+	FD_SET(server_fd, &readfds);
+
+	struct timeval timeout = { 1, 0 }; // Check periodically
+
+	int ready = select(server_fd + 1, &readfds, NULL, NULL, &timeout);
+	if (ready < 0) {
+		if (errno == EINTR)
+			return -1; // Signal interrupted
+		perror("select");
+		return -2; // Error, continue
+	}
+	if (ready == 0)
+		return -2; // Timeout, continue
+
+	if (!FD_ISSET(server_fd, &readfds))
+		return -2; // No connection ready
+
+	printf("%s:%d fd %d\n", __func__, __LINE__, server_fd);
+	if ((client_fd = accept(server_fd, (struct sockaddr *)&address,
+				(socklen_t *)&addrlen)) < 0) {
+		if (errno == EINTR)
+			return -1; // Signal interrupted
+		perror("accept");
+		return -2; // Error, continue
+	}
+	printf("Client connected\n");
+	return client_fd;
+}
+
+static SSL *setup_client_ssl(SSL_CTX *ctx, int client_fd)
+{
+	// Create SSL structure for the accepted connection
+	SSL *ssl = SSL_new(ctx);
+	SSL_set_fd(ssl, client_fd);
+
+	// Perform SSL/TLS handshake
+	if (SSL_accept(ssl) <= 0) {
+		printf("SSL handshake failed\n");
+		ERR_print_errors_fp(stderr);
+		SSL_free(ssl);
+		close(client_fd);
+		return NULL;
+	}
+
+	return ssl;
+}
+
+static int verify_client_certificate(SSL *ssl)
+{
+	// Verify client certificate
+	X509 *cert = SSL_get_peer_certificate(ssl);
+	if (cert == NULL) {
+		printf("Client certificate not provided\n");
+		return -1;
+	}
+	X509_free(cert);
+
+	long verify_result = SSL_get_verify_result(ssl);
+	if (verify_result != X509_V_OK) {
+		printf("Certificate verification failed: %ld\n",
+		       verify_result);
+		return -1;
+	}
+
+	return 0;
+}
+
+static void spawn_client_handler(SSL *ssl, int client_fd)
+{
+	pthread_t client_thread;
+	if (pthread_create(&client_thread, NULL, client_handler,
+			   (void *)ssl) != 0) {
+		perror("Failed to create client thread");
+		SSL_free(ssl);
+		close(client_fd);
+		return;
+	}
+	pthread_detach(client_thread);
+}
+
+static void *start_server(void *data)
+{
+	struct server_args *args = data;
+
+	// Create and configure server socket
+	int server_fd = create_server_socket(args->port);
 
 	// Accept client connections
 	while (!terminate) {
-		fd_set readfds;
-		FD_ZERO(&readfds);
-		FD_SET(server_fd, &readfds);
+		int client_fd = accept_client_connection(server_fd);
+		if (client_fd == -1)
+			break; // Signal interrupted
+		if (client_fd == -2)
+			continue; // Timeout or error, try again
 
-		struct timeval timeout = { 1, 0 }; // Check periodically
-
-		int ready =
-			select(server_fd + 1, &readfds, NULL, NULL, &timeout);
-		if (ready < 0) {
-			if (errno == EINTR) {
-				// Interrupted by a signal
-				break;
-			}
-			perror("select");
+		// Setup SSL for client
+		SSL *ssl = setup_client_ssl(args->ctx, client_fd);
+		if (!ssl)
 			continue;
-		} else if (ready == 0) {
-			// Timeout occurred, check termination flag
-			continue;
-		}
-
-		if (FD_ISSET(server_fd, &readfds)) {
-			printf("%s:%d fd %d\n", __func__, __LINE__, server_fd);
-			if ((client_fd = accept(server_fd,
-						(struct sockaddr *)&address,
-						(socklen_t *)&addrlen)) < 0) {
-				if (errno == EINTR) {
-					// Interrupted by a signal
-					break;
-				}
-				perror("accept");
-				continue;
-			}
-			printf("Client connected\n");
-		} else
-			continue;
-
-		// Create SSL structure for the accepted connection
-		SSL *ssl = SSL_new(args->ctx);
-		SSL_set_fd(ssl, client_fd);
-
-		// Perform SSL/TLS handshake
-		if (SSL_accept(ssl) <= 0) {
-			printf("SSL handshake failed\n");
-			ERR_print_errors_fp(stderr);
-			SSL_free(ssl);
-			close(client_fd);
-			continue;
-		}
 
 		// Verify client certificate
-		X509 *cert = SSL_get_peer_certificate(ssl);
-		if (cert == NULL) {
-			printf("Client certificate not provided\n");
-			SSL_shutdown(ssl);
-			SSL_free(ssl);
-			close(client_fd);
-			continue;
-		}
-		X509_free(cert);
-
-		long verify_result = SSL_get_verify_result(ssl);
-		if (verify_result != X509_V_OK) {
-			printf("Certificate verification failed: %ld\n",
-			       verify_result);
+		if (verify_client_certificate(ssl) < 0) {
 			SSL_shutdown(ssl);
 			SSL_free(ssl);
 			close(client_fd);
 			continue;
 		}
 
-		// Allocate client handler thread
-		pthread_t client_thread;
-		if (pthread_create(&client_thread, NULL, client_handler,
-				   (void *)ssl) != 0) {
-			perror("Failed to create client thread");
-			SSL_free(ssl);
-			close(client_fd);
-			continue;
-		}
-
-		pthread_detach(client_thread);
+		// Spawn client handler thread
+		spawn_client_handler(ssl, client_fd);
 	}
 
 	close(server_fd);
-
 	return NULL;
 }
 
@@ -513,6 +547,95 @@ static void print_version(void)
 {
 	printf("tty-cb-server version %s\n", VERSION);
 	printf("License: %s\n", LICENSE);
+}
+
+static void setup_signal_handler(void)
+{
+	struct sigaction sa;
+	sa.sa_handler = handle_sigint;
+	sa.sa_flags = 0;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGINT, &sa, NULL);
+}
+
+static void parse_max_size(const char *max_size_arg)
+{
+	char *end = NULL;
+	unsigned long long v = strtoull(max_size_arg, &end, 10);
+	if (end == max_size_arg) {
+		fprintf(stderr, "Invalid --max-size value: %s\n",
+			max_size_arg);
+		exit(EXIT_FAILURE);
+	}
+	unsigned long long mult = 1ULL;
+	if (*end) {
+		if (end[1] != '\0') {
+			fprintf(stderr, "Invalid --max-size suffix: %s\n",
+				end);
+			exit(EXIT_FAILURE);
+		}
+		switch (*end) {
+		case 'k':
+		case 'K':
+			mult = 1024ULL;
+			break;
+		case 'm':
+		case 'M':
+			mult = 1024ULL * 1024ULL;
+			break;
+		case 'g':
+		case 'G':
+			mult = 1024ULL * 1024ULL * 1024ULL;
+			break;
+		default:
+			fprintf(stderr,
+				"Unknown size suffix '%c' in --max-size\n",
+				*end);
+			exit(EXIT_FAILURE);
+		}
+	}
+	unsigned long long result = v * mult;
+	if (result > SIZE_MAX) {
+		fprintf(stderr, "--max-size value too large: %s\n",
+			max_size_arg);
+		exit(EXIT_FAILURE);
+	}
+	max_buffer_size = (size_t)result;
+	printf("Configured max clipboard size: %zu bytes\n", max_buffer_size);
+}
+
+static void daemonize(void)
+{
+	pid_t pid = fork();
+	if (pid < 0) {
+		perror("Failed to fork");
+		exit(EXIT_FAILURE);
+	}
+	if (pid > 0) {
+		// Parent process exits
+		printf("Server started in background with PID: %d\n", pid);
+		exit(EXIT_SUCCESS);
+	}
+	// Child continues
+	setsid();
+	if (chdir("/") < 0) {
+		perror("Failed to change directory");
+		exit(EXIT_FAILURE);
+	}
+	close(STDIN_FILENO);
+	close(STDOUT_FILENO);
+	close(STDERR_FILENO);
+}
+
+static void init_shared_buffer(void)
+{
+	shared_capacity = BUFFER_SIZE;
+	shared_buffer = malloc(shared_capacity);
+	if (!shared_buffer) {
+		perror("malloc shared buffer");
+		exit(EXIT_FAILURE);
+	}
+	shared_length = 0;
 }
 
 int main(int argc, char *argv[])
@@ -564,95 +687,24 @@ int main(int argc, char *argv[])
 	}
 
 	// Parse max size argument if provided
-	if (max_size_arg) {
-		char *end = NULL;
-		unsigned long long v = strtoull(max_size_arg, &end, 10);
-		if (end == max_size_arg) {
-			fprintf(stderr, "Invalid --max-size value: %s\n",
-				max_size_arg);
-			exit(EXIT_FAILURE);
-		}
-		unsigned long long mult = 1ULL;
-		if (*end) {
-			if (end[1] != '\0') {
-				fprintf(stderr,
-					"Invalid --max-size suffix: %s\n", end);
-				exit(EXIT_FAILURE);
-			}
-			switch (*end) {
-			case 'k':
-			case 'K':
-				mult = 1024ULL;
-				break;
-			case 'm':
-			case 'M':
-				mult = 1024ULL * 1024ULL;
-				break;
-			case 'g':
-			case 'G':
-				mult = 1024ULL * 1024ULL * 1024ULL;
-				break;
-			default:
-				fprintf(stderr,
-					"Unknown size suffix '%c' in --max-size\n",
-					*end);
-				exit(EXIT_FAILURE);
-			}
-		}
-		unsigned long long result = v * mult;
-		if (result > SIZE_MAX) {
-			fprintf(stderr, "--max-size value too large: %s\n",
-				max_size_arg);
-			exit(EXIT_FAILURE);
-		}
-		max_buffer_size = (size_t)result;
-		printf("Configured max clipboard size: %zu bytes\n",
-		       max_buffer_size);
-	}
+	if (max_size_arg)
+		parse_max_size(max_size_arg);
 
-	if (daemon_mode) {
-		// Simple daemonization
-		pid_t pid = fork();
-		if (pid < 0) {
-			perror("Failed to fork");
-			exit(EXIT_FAILURE);
-		}
-		if (pid > 0) {
-			// Parent process exits
-			printf("Server started in background with PID: %d\n",
-			       pid);
-			exit(EXIT_SUCCESS);
-		}
-		// Child continues
-		setsid();
-		if (chdir("/") < 0) {
-			perror("Failed to change directory");
-			exit(EXIT_FAILURE);
-		}
-		close(STDIN_FILENO);
-		close(STDOUT_FILENO);
-		close(STDERR_FILENO);
-	}
+	// Daemonize if requested
+	if (daemon_mode)
+		daemonize();
 
 	// Set up signal handling
-	struct sigaction sa;
-	sa.sa_handler = handle_sigint;
-	sa.sa_flags = 0;
-	sigemptyset(&sa.sa_mask);
-	sigaction(SIGINT, &sa, NULL);
+	setup_signal_handler();
 
 	// Allocate initial shared buffer
-	shared_capacity = BUFFER_SIZE;
-	shared_buffer = malloc(shared_capacity);
-	if (!shared_buffer) {
-		perror("malloc shared buffer");
-		exit(EXIT_FAILURE);
-	}
-	shared_length = 0;
+	init_shared_buffer();
+
+	// Initialize SSL context
 	SSL_CTX *ctx = init_ssl_context();
 	struct server_args args = { .port = SERVER_PORT, .ctx = ctx };
 
-	// Start server
+	// Start server thread
 	pthread_t server_thread;
 	if (pthread_create(&server_thread, NULL, start_server, &args) != 0) {
 		perror("Failed to create server thread");
