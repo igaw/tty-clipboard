@@ -132,88 +132,6 @@ void handle_error(const char *msg)
 	exit(EXIT_FAILURE);
 }
 
-void read_from_server(SSL *ssl)
-{
-	uint64_t be_len = 0;
-	if (SSL_read(ssl, &be_len, sizeof(be_len)) <= 0) {
-		handle_error("SSL_read length");
-	}
-	size_t len = (size_t)be64toh(be_len);
-	if (len == 0) return; // empty clipboard
-	unsigned char *buf = malloc(len);
-	if (!buf) handle_error("malloc");
-	size_t total = 0;
-	while (total < len) {
-		int r = SSL_read(ssl, buf + total, (int)(len - total));
-		if (r <= 0) handle_error("SSL_read payload");
-		total += (size_t)r;
-	}
-	fwrite(buf, 1, len, stdout);
-	if (buf[len-1] != '\n')
-		fflush(stdout);
-	free(buf);
-}
-
-void write_to_server(SSL *ssl)
-{
-	// Read all stdin into a dynamic buffer
-	size_t cap = 4096, used = 0;
-	unsigned char *buf = malloc(cap);
-	if (!buf) handle_error("malloc");
-	while (1) {
-		if (used == cap) {
-			cap *= 2;
-			unsigned char *tmp = realloc(buf, cap);
-			if (!tmp) handle_error("realloc");
-			buf = tmp;
-		}
-		ssize_t r = read(STDIN_FILENO, buf + used, cap - used);
-		if (r < 0) handle_error("read stdin");
-		if (r == 0) break; // EOF
-		used += (size_t)r;
-	}
-	uint64_t be_len = htobe64((uint64_t)used);
-	if (SSL_write(ssl, &be_len, sizeof(be_len)) <= 0) handle_error("SSL_write length");
-	size_t total = 0;
-	while (total < used) {
-		int w = SSL_write(ssl, buf + total, (int)(used - total));
-		if (w <= 0) handle_error("SSL_write payload");
-		total += (size_t)w;
-	}
-	// Read status byte from server (0=success, 1=reject)
-	unsigned char status = 0;
-	int r = SSL_read(ssl, &status, 1);
-	if (r <= 0) handle_error("SSL_read write-status");
-	if (status != 0) {
-		fprintf(stderr, "Write rejected by server (oversize or error)\n");
-		free(buf);
-		exit(EXIT_FAILURE);
-	}
-	free(buf);
-}
-
-void read_from_server_blocked(SSL *ssl)
-{
-	while (!terminate) {
-		uint64_t be_len = 0;
-		int r = SSL_read(ssl, &be_len, sizeof(be_len));
-		if (r <= 0) break; // connection closed
-		size_t len = (size_t)be64toh(be_len);
-		if (len == 0) continue; // skip empty
-		unsigned char *buf = malloc(len);
-		if (!buf) handle_error("malloc");
-		size_t total = 0;
-		while (total < len) {
-			int rr = SSL_read(ssl, buf + total, (int)(len - total));
-			if (rr <= 0) { free(buf); handle_error("SSL_read blocked payload"); }
-			total += (size_t)rr;
-		}
-		fwrite(buf, 1, len, stdout);
-		fflush(stdout);
-		free(buf);
-	}
-}
-
 static void print_usage(const char *prog_name)
 {
 	printf("Usage: %s [OPTIONS] <read|write> <server_ip>\n", prog_name);
@@ -221,14 +139,14 @@ static void print_usage(const char *prog_name)
 	printf("\nCommands:\n");
 	printf("  read             Read clipboard content from server\n");
 	printf("  write            Write stdin content to server clipboard\n");
+	printf("  read_blocked     Subscribe to clipboard updates (blocking)\n");
 	printf("\nOptions:\n");
-	printf("  -s, --sync       Use synchronous/blocking read mode\n");
 	printf("  -h, --help       Display this help message\n");
 	printf("  -v, --version    Display version information\n");
 	printf("\nExamples:\n");
 	printf("  %s write 192.168.1.100          # Write stdin to clipboard\n", prog_name);
 	printf("  %s read 192.168.1.100           # Read clipboard to stdout\n", prog_name);
-	printf("  %s read 192.168.1.100 --sync    # Read with sync mode\n", prog_name);
+	printf("  %s read_blocked 192.168.1.100   # Subscribe to updates\n", prog_name);
 	printf("\n");
 }
 
@@ -241,34 +159,24 @@ static void print_version(void)
 int main(int argc, char *argv[])
 {
 	int opt;
-	int sync = 0;
 	const char *role = NULL;
 	const char *server_ip = NULL;
-	int use_protobuf = 0;
-	uint64_t client_id = 0; // used in protobuf mode to prevent sync loops
+	uint64_t client_id = 0; // used to prevent sync loops
 
 	static struct option long_options[] = {
-		{"sync",    no_argument, 0, 's'},
 		{"help",    no_argument, 0, 'h'},
 		{"version", no_argument, 0, 'v'},
-		{"protobuf", no_argument, 0, 1000},
 		{0, 0, 0, 0}
 	};
 
-	while ((opt = getopt_long(argc, argv, "shv", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv", long_options, NULL)) != -1) {
 		switch (opt) {
-		case 's':
-			sync = 1;
-			break;
 		case 'h':
 			print_usage(argv[0]);
 			exit(EXIT_SUCCESS);
 		case 'v':
 			print_version();
 			exit(EXIT_SUCCESS);
-		case 1000:
-			use_protobuf = 1;
-			break;
 		default:
 			print_usage(argv[0]);
 			exit(EXIT_FAILURE);
@@ -287,13 +195,10 @@ int main(int argc, char *argv[])
 
 	// Validate role
 	if (strcmp(role, "read") != 0 && strcmp(role, "write") != 0
-#if HAVE_PROTOBUF
-    && !(use_protobuf && strcmp(role, "write_read") == 0)
-    && !(use_protobuf && strcmp(role, "read_blocked") == 0)
-    && !(use_protobuf && strcmp(role, "write_subscribe") == 0)
-#endif
-	    ) {
-		fprintf(stderr, "Error: Command must be 'read' or 'write'\n\n");
+	    && strcmp(role, "write_read") != 0
+	    && strcmp(role, "read_blocked") != 0
+	    && strcmp(role, "write_subscribe") != 0) {
+		fprintf(stderr, "Error: Command must be 'read', 'write', 'write_read', 'read_blocked', or 'write_subscribe'\n\n");
 		print_usage(argv[0]);
 		exit(EXIT_FAILURE);
 	}
@@ -305,29 +210,12 @@ int main(int argc, char *argv[])
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGINT, &sa, NULL);
 
-	// Determine command to send (classic mode)
-	const char *command = NULL;
-
-#if HAVE_PROTOBUF
-	// Generate a random non-zero client_id if protobuf is requested
-	if (use_protobuf) {
-		if (RAND_bytes((unsigned char *)&client_id, sizeof(client_id)) != 1) {
-			fprintf(stderr, "Failed to generate client_id\n");
-			exit(EXIT_FAILURE);
-		}
-		if (client_id == 0) client_id = 1; // ensure non-zero to indicate presence
+	// Generate a random non-zero client_id
+	if (RAND_bytes((unsigned char *)&client_id, sizeof(client_id)) != 1) {
+		fprintf(stderr, "Failed to generate client_id\n");
+		exit(EXIT_FAILURE);
 	}
-#endif
-	if (!use_protobuf) {
-		if (strcmp(role, "read") == 0) {
-			if (sync)
-				command = CMD_READ_BLOCKED;
-			else
-				command = CMD_READ;
-		} else {
-			command = CMD_WRITE;
-		}
-	}
+	if (client_id == 0) client_id = 1; // ensure non-zero
 
 	int server_port = SERVER_PORT;
 
@@ -375,29 +263,7 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	// Classic vs protobuf
-	if (!use_protobuf) {
-		// Send command to server (classic)
-		char cmd_buffer[CMD_MAX_LEN];
-		snprintf(cmd_buffer, CMD_MAX_LEN, "%s\n", command);
-		if (SSL_write(ssl, cmd_buffer, strlen(cmd_buffer)) <= 0) {
-			perror("Failed to send command to server");
-			SSL_free(ssl);
-			close(sock);
-			SSL_CTX_free(ctx);
-			exit(EXIT_FAILURE);
-		}
-
-		if (!strcmp(role, "read")) {
-			if (sync)
-				read_from_server_blocked(ssl);
-			else
-				read_from_server(ssl);
-		} else if (!strcmp(role, "write")) {
-			write_to_server(ssl);
-		}
-	} else {
-#if HAVE_PROTOBUF
+	// Protobuf protocol
 		if (strcmp(role, "write") == 0) {
 			// Read stdin
 			size_t cap=4096, used=0; uint8_t *buf = malloc(cap); if (!buf) handle_error("malloc");
@@ -441,8 +307,8 @@ int main(int argc, char *argv[])
 			ttycb__envelope__free_unpacked(resp, NULL);
 		}
 	}
-#endif
-}	// Initiate graceful shutdown after all data is sent
+
+// Initiate graceful shutdown after all data is sent
 	if (SSL_shutdown(ssl) == 0) {
 		// The first call to SSL_shutdown() sends a close_notify alert to the server
 		if (SSL_shutdown(ssl) == 1) {

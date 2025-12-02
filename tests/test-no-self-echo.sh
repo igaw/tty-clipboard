@@ -19,8 +19,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Start server in protobuf mode
-"$SERVER_BIN" --protobuf &
+# Start server
+"$SERVER_BIN" &
 SERVER_PID=$!
 sleep 2
 
@@ -32,7 +32,7 @@ SUBOUT=$(mktemp)
 echo "=== Testing write_subscribe self-echo prevention ==="
 echo "my_marker_$$" > /tmp/write_$$
 
-timeout 10 cat /tmp/write_$$ | "$CLIENT_BIN" --protobuf write_subscribe 127.0.0.1 > "$SUBOUT" 2>/dev/null &
+timeout 10 cat /tmp/write_$$ | "$CLIENT_BIN" write_subscribe 127.0.0.1 > "$SUBOUT" 2>/dev/null &
 SUB_PID=$!
 rm /tmp/write_$$
 
@@ -40,7 +40,7 @@ sleep 1
 
 # Write some messages from other connections
 for i in {1..100}; do
-  echo "external_$i" | "$CLIENT_BIN" --protobuf write 127.0.0.1 2>/dev/null
+  echo "external_$i" | "$CLIENT_BIN" write 127.0.0.1 2>/dev/null
 done
 
 sleep 1

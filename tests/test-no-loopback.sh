@@ -20,8 +20,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Start server in protobuf mode
-"$SERVER_BIN" --protobuf &
+# Start server
+"$SERVER_BIN" &
 SERVER_PID=$!
 sleep 2
 
@@ -37,13 +37,13 @@ echo "second_message" > "$WRITE2"
 
 echo "DEBUG: Starting subscriber 1..."
 # Subscriber 1 starts listening
-timeout 10 "$CLIENT_BIN" --protobuf read_blocked 127.0.0.1 > "$TMP1" 2>/dev/null &
+timeout 10 "$CLIENT_BIN" read_blocked 127.0.0.1 > "$TMP1" 2>/dev/null &
 CLIENT1_PID=$!
 echo "DEBUG: Subscriber 1 PID: $CLIENT1_PID"
 
 echo "DEBUG: Starting subscriber 2..."
 # Subscriber 2 starts listening
-timeout 10 "$CLIENT_BIN" --protobuf read_blocked 127.0.0.1 > "$TMP2" 2>/dev/null &
+timeout 10 "$CLIENT_BIN" read_blocked 127.0.0.1 > "$TMP2" 2>/dev/null &
 CLIENT2_PID=$!
 echo "DEBUG: Subscriber 2 PID: $CLIENT2_PID"
 
@@ -52,14 +52,14 @@ sleep 1
 
 echo "DEBUG: Client 1 writing..."
 # Write from client 1
-cat "$WRITE1" | "$CLIENT_BIN" --protobuf write 127.0.0.1 2>/dev/null
+cat "$WRITE1" | "$CLIENT_BIN" write 127.0.0.1 2>/dev/null
 echo "DEBUG: Client 1 write complete"
 
 sleep 1
 
 echo "DEBUG: Client 2 writing..."
 # Write from client 2
-cat "$WRITE2" | "$CLIENT_BIN" --protobuf write 127.0.0.1 2>/dev/null
+cat "$WRITE2" | "$CLIENT_BIN" write 127.0.0.1 2>/dev/null
 echo "DEBUG: Client 2 write complete"
 
 # Give time for propagation

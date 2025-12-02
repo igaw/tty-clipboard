@@ -26,9 +26,9 @@ sleep 2
 TMP_IN=$(mktemp)
 head -c 1024 /dev/urandom > "$TMP_IN"
 
-# Start blocking read (sync) before write; will capture first generation update
+# Start blocking read (subscribe mode) before write; will capture first generation update
 TMP_OUT=$(mktemp)
-timeout 5 "$CLIENT_BIN" read 127.0.0.1 --sync > "$TMP_OUT" &
+timeout 5 "$CLIENT_BIN" read_blocked 127.0.0.1 > "$TMP_OUT" &
 SYNC_PID=$!
 sleep 1
 
@@ -39,9 +39,9 @@ sleep 1
 # Wait for sync read to finish (or timeout)
 wait $SYNC_PID 2>/dev/null || true
 
-# Compare (now should match exactly with length-prefixed protocol)
+# Compare (now should match exactly with protobuf protocol)
 if cmp -s "$TMP_IN" "$TMP_OUT"; then
-  echo "PASS: binary roundtrip matched (sync)"
+  echo "PASS: binary roundtrip matched (subscribe)"
   exit 0
 else
   echo "FAIL: binary differs after roundtrip" >&2

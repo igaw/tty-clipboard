@@ -39,9 +39,7 @@ static size_t max_buffer_size = 0;
 // Oversize policy: reject (close connection) or drop (discard payload)
 typedef enum { OVERSIZE_REJECT = 0, OVERSIZE_DROP = 1 } oversize_policy_t;
 static oversize_policy_t oversize_policy = OVERSIZE_REJECT;
-#if HAVE_PROTOBUF
-static int g_use_protobuf = 0;
-#endif
+
 
 // Signal handler
 void handle_sigint(int sig __attribute__((unused)))
@@ -153,181 +151,12 @@ static int ssl_write_all(SSL *ssl, const void *buf, size_t len)
 	return 0;
 }
 
-static void handle_write(SSL *ssl)
-{
-	uint64_t be_len = 0;
-	if (ssl_read_all(ssl, &be_len, sizeof(be_len)) < 0) {
-		printf("Failed to read length prefix\n");
-		return;
-	}
-	size_t len = (size_t)be64toh(be_len);
-	if (len == 0) {
-		printf("Empty write received\n");
-		unsigned char status = 0; // success (no change)
-		(void)ssl_write_all(ssl, &status, 1);
-		return;
-	}
-	unsigned char status = 0; // 0=success, 1=rejected oversize
-	int oversize = max_buffer_size && len > max_buffer_size;
-	if (oversize) {
-		if (oversize_policy == OVERSIZE_REJECT) {
-			status = 1;
-			printf("Rejected write of %zu bytes (exceeds max %zu)\n", len, max_buffer_size);
-		} else {
-			printf("Dropping write of %zu bytes (exceeds max %zu)\n", len, max_buffer_size);
-		}
-		// Discard incoming payload in chunks to keep stream aligned
-		const size_t CHUNK = 64 * 1024;
-		unsigned char *discard = malloc(CHUNK);
-		if (!discard) { perror("malloc discard"); status = 1; }
-		size_t remaining = len;
-		while (discard && remaining > 0) {
-			size_t want = remaining < CHUNK ? remaining : CHUNK;
-			if (ssl_read_all(ssl, discard, want) < 0) {
-				printf("Failed discarding oversize payload\n");
-				status = 1;
-				break;
-			}
-			remaining -= want;
-		}
-		free(discard);
-		// Send status byte to client
-		(void)ssl_write_all(ssl, &status, 1);
-		return;
-	}
-	unsigned char *tmp = malloc(len);
-	if (!tmp) {
-		perror("malloc");
-		status = 1;
-		(void)ssl_write_all(ssl, &status, 1);
-		return;
-	}
-	if (ssl_read_all(ssl, tmp, len) < 0) {
-		printf("Failed to read payload bytes\n");
-		status = 1;
-		(void)ssl_write_all(ssl, &status, 1);
-		free(tmp);
-		return;
-	}
-	pthread_mutex_lock(&buffer_mutex);
-	if (len > shared_capacity) {
-		char *nbuf = realloc(shared_buffer, len);
-		if (!nbuf) {
-			pthread_mutex_unlock(&buffer_mutex);
-			perror("realloc shared buffer");
-			free(tmp);
-			return;
-		}
-		shared_buffer = nbuf;
-		shared_capacity = len;
-		printf("Resized shared buffer to %zu bytes\n", shared_capacity);
-	}
-	memcpy(shared_buffer, tmp, len);
-	shared_length = len;
-	gen++;
-	pthread_cond_broadcast(&buffer_cond);
-	pthread_mutex_unlock(&buffer_mutex);
-	printf("Stored %zu bytes\n", len);
-	// Send success status
-	(void)ssl_write_all(ssl, &status, 1);
-	free(tmp);
-}
-
-static void handle_read(SSL *ssl)
-{
-	pthread_mutex_lock(&buffer_mutex);
-	size_t len = shared_length;
-	uint64_t be_len = htobe64((uint64_t)len);
-	int rc = ssl_write_all(ssl, &be_len, sizeof(be_len));
-	if (rc == 0 && len > 0)
-		rc = ssl_write_all(ssl, shared_buffer, len);
-	pthread_mutex_unlock(&buffer_mutex);
-	if (rc < 0)
-		printf("Failed to send read response\n");
-	else
-		printf("Sent %zu bytes to reader\n", len);
-}
-
-static void handle_read_blocked(SSL *ssl)
-{
-	unsigned int seen = 0;
-	while (!terminate) {
-		pthread_mutex_lock(&buffer_mutex);
-		while (seen == gen && !terminate) {
-			pthread_cond_wait(&buffer_cond, &buffer_mutex);
-		}
-		if (terminate) {
-			pthread_mutex_unlock(&buffer_mutex);
-			break;
-		}
-		seen = gen;
-		size_t len = shared_length;
-		uint64_t be_len = htobe64((uint64_t)len);
-		int rc = ssl_write_all(ssl, &be_len, sizeof(be_len));
-		if (rc == 0 && len > 0)
-			rc = ssl_write_all(ssl, shared_buffer, len);
-		pthread_mutex_unlock(&buffer_mutex);
-		if (rc < 0) {
-			printf("Failed to send blocked update\n");
-			break;
-		}
-		printf("Blocked reader sent %zu bytes\n", len);
-	}
-}
-
-// Unified client handler that reads command and dispatches
+// Protobuf client handler
 void *client_handler(void *arg)
 {
 	SSL *ssl = (SSL *)arg;
-#if HAVE_PROTOBUF
-	if (g_use_protobuf) {
-		// Protobuf mode handler
-		// Forward-declare
-		goto proto_mode;
-	}
-#endif
-	char command[CMD_MAX_LEN];
 
-	// Read the command from client
-	memset(command, 0, CMD_MAX_LEN);
-	int bytes_read = SSL_read(ssl, command, CMD_MAX_LEN - 1);
-	if (bytes_read <= 0) {
-		printf("Failed to read command from client\n");
-		goto cleanup;
-	}
-
-	// Remove trailing newline if present
-	size_t len = strlen(command);
-	if (len > 0 && command[len - 1] == '\n') {
-		command[len - 1] = '\0';
-	}
-
-	printf("Client requested operation: '%s'\n", command);
-
-	// Dispatch to appropriate handler
-	if (strcmp(command, CMD_WRITE) == 0) {
-		handle_write(ssl);
-	} else if (strcmp(command, CMD_READ) == 0) {
-		handle_read(ssl);
-	} else if (strcmp(command, CMD_READ_BLOCKED) == 0) {
-		handle_read_blocked(ssl);
-	} else {
-		printf("Unknown command: '%s'\n", command);
-	}
-
-cleanup:
-	// After finishing, initiate a graceful shutdown
-	if (SSL_shutdown(ssl) == 0) {
-		// The first call to SSL_shutdown() sends a close_notify alert to the client
-		SSL_shutdown(ssl);
-	}
-
-	SSL_free(ssl);
-	pthread_exit(NULL);
-
-#if HAVE_PROTOBUF
-proto_mode: ;
-	// Protobuf envelope helpers
+	// Protobuf envelope handler
 	while (!terminate) {
 		// Read envelope frame
 		uint64_t be_len = 0;
@@ -352,18 +181,18 @@ proto_mode: ;
 				// Update nothing
 				Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
 				Ttycb__WriteResponse wr = TTYCB__WRITE_RESPONSE__INIT;
-			wr.ok = ok;
-			if (!ok) wr.message = (char*)"oversize";
-			wr.message_id = 0; // No message_id for rejected writes
-			resp.write_resp = &wr; resp.body_case = TTYCB__ENVELOPE__BODY_WRITE_RESP;
-			size_t outsz = ttycb__envelope__get_packed_size(&resp);
-			unsigned char *outbuf = malloc(outsz);
-			if (!outbuf) { ttycb__envelope__free_unpacked(env, NULL); break; }
-			ttycb__envelope__pack(&resp, outbuf);
-			uint64_t pfx = htobe64((uint64_t)outsz);
-			if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 || ssl_write_all(ssl, outbuf, outsz) < 0) { free(outbuf); ttycb__envelope__free_unpacked(env, NULL); break; }
-			free(outbuf);
-			ttycb__envelope__free_unpacked(env, NULL);
+				wr.ok = ok;
+				if (!ok) wr.message = (char*)"oversize";
+				wr.message_id = 0; // No message_id for rejected writes
+				resp.write_resp = &wr; resp.body_case = TTYCB__ENVELOPE__BODY_WRITE_RESP;
+				size_t outsz = ttycb__envelope__get_packed_size(&resp);
+				unsigned char *outbuf = malloc(outsz);
+				if (!outbuf) { ttycb__envelope__free_unpacked(env, NULL); break; }
+				ttycb__envelope__pack(&resp, outbuf);
+				uint64_t pfx = htobe64((uint64_t)outsz);
+				if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 || ssl_write_all(ssl, outbuf, outsz) < 0) { free(outbuf); ttycb__envelope__free_unpacked(env, NULL); break; }
+				free(outbuf);
+				ttycb__envelope__free_unpacked(env, NULL);
 				continue;
 			}
 			// store
@@ -379,64 +208,64 @@ proto_mode: ;
 			shared_message_id = msg_id;
 			gen++;
 			pthread_cond_broadcast(&buffer_cond);
-		pthread_mutex_unlock(&buffer_mutex);
-		// reply ok
-		Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
-		Ttycb__WriteResponse wr = TTYCB__WRITE_RESPONSE__INIT;
-		wr.ok = 1; wr.message_id = msg_id; resp.write_resp = &wr; resp.body_case = TTYCB__ENVELOPE__BODY_WRITE_RESP;
-		size_t outsz = ttycb__envelope__get_packed_size(&resp);
-		unsigned char *outbuf = malloc(outsz);
-		if (!outbuf) { ttycb__envelope__free_unpacked(env, NULL); break; }
-		ttycb__envelope__pack(&resp, outbuf);
-		uint64_t pfx = htobe64((uint64_t)outsz);
-		if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 || ssl_write_all(ssl, outbuf, outsz) < 0) { free(outbuf); ttycb__envelope__free_unpacked(env, NULL); break; }
-		free(outbuf);
-	} else if (env->body_case == TTYCB__ENVELOPE__BODY_READ && env->read) {
-		pthread_mutex_lock(&buffer_mutex);
-		size_t len = shared_length;
-		Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
-		Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
-		df.data.len = len; df.data.data = (uint8_t*)shared_buffer;
-		resp.data = &df; resp.body_case = TTYCB__ENVELOPE__BODY_DATA;
-		size_t outsz = ttycb__envelope__get_packed_size(&resp);
-		unsigned char *outbuf = malloc(outsz);
-		if (!outbuf) { pthread_mutex_unlock(&buffer_mutex); ttycb__envelope__free_unpacked(env, NULL); break; }
-		ttycb__envelope__pack(&resp, outbuf);
-		pthread_mutex_unlock(&buffer_mutex);
-		uint64_t pfx = htobe64((uint64_t)outsz);
-		if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 || ssl_write_all(ssl, outbuf, outsz) < 0) { free(outbuf); ttycb__envelope__free_unpacked(env, NULL); break; }
-		free(outbuf);
-	} else if (env->body_case == TTYCB__ENVELOPE__BODY_SUBSCRIBE && env->subscribe) {
-		pthread_mutex_lock(&buffer_mutex);
-		unsigned int seen = gen; // Start from current generation to only receive future updates
-		uint64_t last_sent_message_id = shared_message_id; // Track last message_id sent to this subscriber
-		pthread_mutex_unlock(&buffer_mutex);
-		while (!terminate) {
+			pthread_mutex_unlock(&buffer_mutex);
+			// reply ok
+			Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
+			Ttycb__WriteResponse wr = TTYCB__WRITE_RESPONSE__INIT;
+			wr.ok = 1; wr.message_id = msg_id; resp.write_resp = &wr; resp.body_case = TTYCB__ENVELOPE__BODY_WRITE_RESP;
+			size_t outsz = ttycb__envelope__get_packed_size(&resp);
+			unsigned char *outbuf = malloc(outsz);
+			if (!outbuf) { ttycb__envelope__free_unpacked(env, NULL); break; }
+			ttycb__envelope__pack(&resp, outbuf);
+			uint64_t pfx = htobe64((uint64_t)outsz);
+			if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 || ssl_write_all(ssl, outbuf, outsz) < 0) { free(outbuf); ttycb__envelope__free_unpacked(env, NULL); break; }
+			free(outbuf);
+		} else if (env->body_case == TTYCB__ENVELOPE__BODY_READ && env->read) {
 			pthread_mutex_lock(&buffer_mutex);
-			while (seen == gen && !terminate) pthread_cond_wait(&buffer_cond, &buffer_mutex);
-			if (terminate) { pthread_mutex_unlock(&buffer_mutex); break; }
-			seen = gen;
-			// Skip if we've already sent this message to this subscriber
-			if (shared_message_id == last_sent_message_id) {
-				pthread_mutex_unlock(&buffer_mutex);
-				continue;
-			}
 			size_t len = shared_length;
-			uint64_t msg_id = shared_message_id;
-			last_sent_message_id = msg_id;
 			Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
 			Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
 			df.data.len = len; df.data.data = (uint8_t*)shared_buffer;
-			df.message_id = msg_id;
 			resp.data = &df; resp.body_case = TTYCB__ENVELOPE__BODY_DATA;
 			size_t outsz = ttycb__envelope__get_packed_size(&resp);
 			unsigned char *outbuf = malloc(outsz);
-			if (!outbuf) { pthread_mutex_unlock(&buffer_mutex); break; }
+			if (!outbuf) { pthread_mutex_unlock(&buffer_mutex); ttycb__envelope__free_unpacked(env, NULL); break; }
 			ttycb__envelope__pack(&resp, outbuf);
 			pthread_mutex_unlock(&buffer_mutex);
 			uint64_t pfx = htobe64((uint64_t)outsz);
-			if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 || ssl_write_all(ssl, outbuf, outsz) < 0) { free(outbuf); break; }
+			if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 || ssl_write_all(ssl, outbuf, outsz) < 0) { free(outbuf); ttycb__envelope__free_unpacked(env, NULL); break; }
 			free(outbuf);
+		} else if (env->body_case == TTYCB__ENVELOPE__BODY_SUBSCRIBE && env->subscribe) {
+			pthread_mutex_lock(&buffer_mutex);
+			unsigned int seen = gen; // Start from current generation to only receive future updates
+			uint64_t last_sent_message_id = shared_message_id; // Track last message_id sent to this subscriber
+			pthread_mutex_unlock(&buffer_mutex);
+			while (!terminate) {
+				pthread_mutex_lock(&buffer_mutex);
+				while (seen == gen && !terminate) pthread_cond_wait(&buffer_cond, &buffer_mutex);
+				if (terminate) { pthread_mutex_unlock(&buffer_mutex); break; }
+				seen = gen;
+				// Skip if we've already sent this message to this subscriber
+				if (shared_message_id == last_sent_message_id) {
+					pthread_mutex_unlock(&buffer_mutex);
+					continue;
+				}
+				size_t len = shared_length;
+				uint64_t msg_id = shared_message_id;
+				last_sent_message_id = msg_id;
+				Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
+				Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
+				df.data.len = len; df.data.data = (uint8_t*)shared_buffer;
+				df.message_id = msg_id;
+				resp.data = &df; resp.body_case = TTYCB__ENVELOPE__BODY_DATA;
+				size_t outsz = ttycb__envelope__get_packed_size(&resp);
+				unsigned char *outbuf = malloc(outsz);
+				if (!outbuf) { pthread_mutex_unlock(&buffer_mutex); break; }
+				ttycb__envelope__pack(&resp, outbuf);
+				pthread_mutex_unlock(&buffer_mutex);
+				uint64_t pfx = htobe64((uint64_t)outsz);
+				if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 || ssl_write_all(ssl, outbuf, outsz) < 0) { free(outbuf); break; }
+				free(outbuf);
 			}
 		} else {
 			// Unknown: ignore
@@ -446,13 +275,11 @@ proto_mode: ;
 	if (SSL_shutdown(ssl) == 0) SSL_shutdown(ssl);
 	SSL_free(ssl);
 	pthread_exit(NULL);
-#endif
 }
 
 struct server_args {
 	int port;
 	SSL_CTX *ctx;
-	int use_protobuf;
 };
 
 static void *start_server(void *data)
@@ -566,14 +393,7 @@ static void *start_server(void *data)
 
 		// Allocate client handler thread
 		pthread_t client_thread;
-		void *(*handler_fn)(void *) = client_handler;
-#if HAVE_PROTOBUF
-		if (args->use_protobuf) {
-			// wrap SSL pointer into a tiny struct if needed; reuse same signature
-			handler_fn = client_handler; // default to ASCII; will branch inside
-		}
-#endif
-		if (pthread_create(&client_thread, NULL, handler_fn, (void *)ssl) != 0) {
+		if (pthread_create(&client_thread, NULL, client_handler, (void *)ssl) != 0) {
 			perror("Failed to create client thread");
 			SSL_free(ssl);
 			close(client_fd);
@@ -598,9 +418,6 @@ static void print_usage(const char *prog_name)
 	printf("  -d, --daemon     Run in daemon mode (background)\n");
 	printf("  -m, --max-size N[K|M|G]  Set maximum clipboard size (0=unlimited)\n");
 	printf("  -p, --oversize-policy reject|drop  Action on oversize write (default: reject)\n");
-#if HAVE_PROTOBUF
-	printf("  --protobuf            Enable protobuf-c bidirectional protocol mode\n");
-#endif
 	printf("\nPort:\n");
 	printf("  %d              Server port (all operations)\n", SERVER_PORT);
 	printf("\nProtocol:\n");
@@ -622,7 +439,6 @@ int main(int argc, char *argv[])
 	int opt;
 	int daemon_mode = 0;
 	char *max_size_arg = NULL;
-	int use_protobuf = 0;
 
 	static struct option long_options[] = {
 		{"help",    no_argument, 0, 'h'},
@@ -630,9 +446,6 @@ int main(int argc, char *argv[])
 		{"daemon",  no_argument, 0, 'd'},
 		{"max-size", required_argument, 0, 'm'},
 		{"oversize-policy", required_argument, 0, 'p'},
-#if HAVE_PROTOBUF
-		{"protobuf", no_argument, 0, 1000},
-#endif
 		{0, 0, 0, 0}
 	};
 
@@ -659,9 +472,6 @@ int main(int argc, char *argv[])
 				fprintf(stderr, "Invalid oversize policy: %s (use reject|drop)\n", optarg);
 				exit(EXIT_FAILURE);
 			}
-			break;
-		case 1000: // --protobuf
-			use_protobuf = 1;
 			break;
 		default:
 			print_usage(argv[0]);
@@ -740,15 +550,7 @@ int main(int argc, char *argv[])
 	}
 	shared_length = 0;
 	SSL_CTX *ctx = init_ssl_context();
-	struct server_args args = { .port = SERVER_PORT, .ctx = ctx, .use_protobuf = use_protobuf };
-#if HAVE_PROTOBUF
-	g_use_protobuf = use_protobuf;
-#else
-	if (use_protobuf) {
-		fprintf(stderr, "protobuf mode requested but not built with protobuf-c support. Reconfigure with -Dwith_protobuf=true\n");
-		exit(EXIT_FAILURE);
-	}
-#endif
+	struct server_args args = { .port = SERVER_PORT, .ctx = ctx };
 
 	// Start server
 	pthread_t server_thread;
