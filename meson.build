@@ -5,13 +5,10 @@ project('tty-clipboard', 'c',
     'warning_level=3',
     'c_std=gnu99'])
 
-# Find the OpenSSL package
+# Find required dependencies
 openssl_dep = dependency('openssl', required: true)
-
-# Optional protobuf-c support
-with_protobuf = get_option('with_protobuf')
-protobuf_dep = dependency('libprotobuf-c', required: with_protobuf)
-protoc_c = find_program('protoc-c', required: with_protobuf)
+protobuf_dep = dependency('libprotobuf-c', required: true)
+protoc_c = find_program('protoc-c', required: true)
 
 # Include subdirectories
 subdir('src')

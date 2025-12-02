@@ -18,10 +18,11 @@
 #include <sys/select.h>
 #include <stdint.h>
 #include <endian.h>
-#if HAVE_PROTOBUF
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
 #include <protobuf-c/protobuf-c.h>
 #include "clipboard.pb-c.h"
-#endif
+#pragma GCC diagnostic pop
 
 // Shared buffer and mutex (dynamic)
 char *shared_buffer = NULL;

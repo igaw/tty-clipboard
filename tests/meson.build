@@ -89,42 +89,40 @@ test('max-size-drop',
   is_parallel: false,
 )
 
-# Protobuf test (only if enabled)
-if with_protobuf
-  test('protobuf-mode',
-    find_program('test-protobuf.sh'),
-    args: [
-      cb_server.full_path(),
-      cb_client.full_path(),
-      meson.current_build_dir() / 'test-config',
-    ],
-    depends: [cert_files, cb_server, cb_client],
-    timeout: 30,
-    is_parallel: false,
-  )
+# Protobuf tests
+test('protobuf-mode',
+  find_program('test-protobuf.sh'),
+  args: [
+    cb_server.full_path(),
+    cb_client.full_path(),
+    meson.current_build_dir() / 'test-config',
+  ],
+  depends: [cert_files, cb_server, cb_client],
+  timeout: 30,
+  is_parallel: false,
+)
 
-  test('no-loopback',
-    find_program('test-no-loopback.sh'),
-    args: [
-      cb_server.full_path(),
-      cb_client.full_path(),
-      meson.current_build_dir() / 'test-config',
-    ],
-    depends: [cert_files, cb_server, cb_client],
-    timeout: 30,
-    is_parallel: false,
-  )
+test('no-loopback',
+  find_program('test-no-loopback.sh'),
+  args: [
+    cb_server.full_path(),
+    cb_client.full_path(),
+    meson.current_build_dir() / 'test-config',
+  ],
+  depends: [cert_files, cb_server, cb_client],
+  timeout: 30,
+  is_parallel: false,
+)
 
-  test('no-self-echo',
-    find_program('test-no-self-echo.sh'),
-    args: [
-      cb_server.full_path(),
-      cb_client.full_path(),
-      meson.current_build_dir() / 'test-config',
-    ],
-    depends: [cert_files, cb_server, cb_client],
-    timeout: 30,
-    is_parallel: false,
-  )
-endif
+test('no-self-echo',
+  find_program('test-no-self-echo.sh'),
+  args: [
+    cb_server.full_path(),
+    cb_client.full_path(),
+    meson.current_build_dir() / 'test-config',
+  ],
+  depends: [cert_files, cb_server, cb_client],
+  timeout: 30,
+  is_parallel: false,
+)
 

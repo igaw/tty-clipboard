@@ -29,9 +29,11 @@ void handle_sigint(int sig __attribute__((unused)))
 	terminate = 1; // Set the termination flag
 }
 
-#if HAVE_PROTOBUF
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
 #include <protobuf-c/protobuf-c.h>
 #include "clipboard.pb-c.h"
+#pragma GCC diagnostic pop
 
 static void pb_send_envelope(SSL *ssl, Ttycb__Envelope *env)
 {
@@ -85,7 +87,6 @@ static Ttycb__Envelope *pb_recv_envelope(SSL *ssl)
 		handle_error("unpack");
 	return e;
 }
-#endif
 
 SSL_CTX *init_ssl_context()
 {
