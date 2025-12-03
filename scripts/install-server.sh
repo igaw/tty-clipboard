@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+set -euo pipefail
+
+# Script to install tty-clipboard server on a remote host
+
+show_usage() {
+    cat << EOF
+Usage: $0 [OPTIONS] <hostname> <build_dir>
+
+Install tty-clipboard server on a remote host.
+
+Arguments:
+    hostname        SSH hostname or user@hostname of the remote host
+    build_dir       Path to the build directory containing the binaries
+
+Options:
+    -h, --help      Show this help message
+
+This script will:
+  1. Check if certificates exist locally, generate them if needed
+  2. Copy certificates to the remote host
+  3. Copy server and client binaries to remote ~/.local/bin
+  4. Create a systemd user service to start the server on login
+  5. Update local ~/.ssh/config with LocalForward (if hostname entry exists)
+
+Example:
+    $0 myserver.example.com ./builddir
+    $0 user@server.com .build
+
+EOF
+}
+
+# Parse arguments
+if [[ $# -lt 2 ]]; then
+    echo "Error: Missing required arguments"
+    show_usage
+    exit 1
+fi
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_usage
+            exit 0
+            ;;
+        -*)
+            echo "Error: Unknown option: $1"
+            show_usage
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+REMOTE_HOST="$1"
+BUILD_DIR="$2"
+
+if [ ! -d "$BUILD_DIR" ]; then
+    echo "Error: Build directory '$BUILD_DIR' does not exist"
+    exit 1
+fi
+
+# Check for binaries
+SERVER_BIN="$BUILD_DIR/src/tty-cb-server"
+CLIENT_BIN="$BUILD_DIR/src/tty-cb-client"
+
+if [ ! -f "$SERVER_BIN" ]; then
+    echo "Error: Server binary not found at $SERVER_BIN"
+    exit 1
+fi
+
+if [ ! -f "$CLIENT_BIN" ]; then
+    echo "Error: Client binary not found at $CLIENT_BIN"
+    exit 1
+fi
+
+# Local certificate paths
+LOCAL_CFG_BASE=${XDG_CONFIG_HOME:-"$HOME/.config"}/tty-clipboard
+LOCAL_CERT_DIR="$LOCAL_CFG_BASE/certs"
+LOCAL_KEY_DIR="$LOCAL_CFG_BASE/keys"
+
+# Check if certificates exist locally, create if needed
+if [ ! -f "$LOCAL_CERT_DIR/ca.crt" ] || [ ! -f "$LOCAL_CERT_DIR/server.crt" ] || \
+   [ ! -f "$LOCAL_CERT_DIR/client.crt" ] || [ ! -f "$LOCAL_KEY_DIR/ca.key" ] || \
+   [ ! -f "$LOCAL_KEY_DIR/server.key" ] || [ ! -f "$LOCAL_KEY_DIR/client.key" ]; then
+    echo "Certificates not found locally. Generating..."
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    "$SCRIPT_DIR/create-certs.sh"
+fi
+
+echo "Using local certificates from: $LOCAL_CFG_BASE"
+
+# Remote paths
+REMOTE_CFG_BASE="\${XDG_CONFIG_HOME:-\$HOME/.config}/tty-clipboard"
+
+echo ""
+echo "Installing tty-clipboard server on $REMOTE_HOST..."
+echo ""
+
+# Create remote directories
+echo "Creating remote directories..."
+ssh "$REMOTE_HOST" "mkdir -p ~/.local/bin $REMOTE_CFG_BASE/certs $REMOTE_CFG_BASE/keys"
+
+# Copy certificates to remote host
+echo "Copying certificates to remote host..."
+scp "$LOCAL_CERT_DIR/ca.crt" \
+    "$LOCAL_CERT_DIR/server.crt" \
+    "$LOCAL_CERT_DIR/client.crt" \
+    "$REMOTE_HOST:$REMOTE_CFG_BASE/certs/"
+
+scp "$LOCAL_KEY_DIR/ca.key" \
+    "$LOCAL_KEY_DIR/server.key" \
+    "$LOCAL_KEY_DIR/client.key" \
+    "$REMOTE_HOST:$REMOTE_CFG_BASE/keys/"
+
+# Set appropriate permissions on remote keys
+echo "Setting certificate permissions..."
+ssh "$REMOTE_HOST" "chmod 600 $REMOTE_CFG_BASE/keys/*.key"
+
+# Copy binaries to remote host
+echo "Copying binaries to remote host..."
+scp "$SERVER_BIN" "$CLIENT_BIN" "$REMOTE_HOST:~/.local/bin/"
+ssh "$REMOTE_HOST" "chmod +x ~/.local/bin/tty-cb-server ~/.local/bin/tty-cb-client"
+
+# Create systemd user service
+echo "Creating systemd user service..."
+ssh "$REMOTE_HOST" "mkdir -p ~/.config/systemd/user"
+
+# Generate the service file content
+SERVICE_CONTENT='[Unit]
+Description=TTY Clipboard Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/tty-cb-server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+'
+
+# Write service file to remote host
+ssh "$REMOTE_HOST" "cat > ~/.config/systemd/user/tty-clipboard.service" << EOF
+$SERVICE_CONTENT
+EOF
+
+# Enable and start the service
+echo "Enabling and starting the service..."
+ssh "$REMOTE_HOST" "systemctl --user daemon-reload && \
+                     systemctl --user enable tty-clipboard.service && \
+                     systemctl --user restart tty-clipboard.service"
+
+# Check service status
+echo ""
+echo "Checking service status..."
+if ssh "$REMOTE_HOST" "systemctl --user is-active --quiet tty-clipboard.service"; then
+    echo "✓ Service is running"
+    ssh "$REMOTE_HOST" "systemctl --user status tty-clipboard.service --no-pager -l"
+else
+    echo "✗ Service failed to start"
+    echo "Check logs with: ssh $REMOTE_HOST 'journalctl --user -u tty-clipboard.service'"
+    exit 1
+fi
+
+# Update SSH config with LocalForward
+echo ""
+echo "Updating SSH config with LocalForward..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SSH_CONFIG="${HOME}/.ssh/config"
+
+# Extract just the hostname part (without user@) for SSH config lookup
+HOSTNAME_ONLY="${REMOTE_HOST##*@}"
+
+if [ -f "$SSH_CONFIG" ] && grep -q "^Host.*\b${HOSTNAME_ONLY}\b" "$SSH_CONFIG"; then
+    echo "Found SSH config entry for '$HOSTNAME_ONLY', adding LocalForward..."
+    python3 "$SCRIPT_DIR/update-ssh-localforward.py" "$HOSTNAME_ONLY" "127.0.0.1:5457 127.0.0.1:5457"
+    echo "✓ SSH config updated"
+else
+    echo "⚠ No SSH config entry found for '$HOSTNAME_ONLY'"
+    echo ""
+    echo "To enable automatic port forwarding, add this to your ~/.ssh/config:"
+    echo ""
+    echo "Host $HOSTNAME_ONLY"
+    echo "    HostName $HOSTNAME_ONLY"
+    echo "    LocalForward 127.0.0.1:5457 127.0.0.1:5457"
+    echo ""
+    echo "Or connect manually with port forwarding:"
+    echo "    ssh -L 127.0.0.1:5457:127.0.0.1:5457 $REMOTE_HOST"
+fi
+
+echo ""
+echo "=========================================="
+echo "Installation complete!"
+echo "=========================================="
+echo ""
+echo "Server installed on: $REMOTE_HOST"
+echo "Binaries location: ~/.local/bin/"
+echo "Certificates location: $REMOTE_CFG_BASE"
+echo "Service: tty-clipboard.service (systemd user service)"
+echo ""
+echo "To use the clipboard:"
+echo "  1. Connect with SSH (port forwarding will be automatic if configured above)"
+echo "  2. Use tty-cb-client to copy/paste:"
+echo "     echo 'hello' | tty-cb-client write"
+echo "     tty-cb-client read"
+echo ""
+echo "Useful commands:"
+echo "  Check status:    ssh $REMOTE_HOST 'systemctl --user status tty-clipboard.service'"
+echo "  View logs:       ssh $REMOTE_HOST 'journalctl --user -u tty-clipboard.service -f'"
+echo "  Stop service:    ssh $REMOTE_HOST 'systemctl --user stop tty-clipboard.service'"
+echo "  Start service:   ssh $REMOTE_HOST 'systemctl --user start tty-clipboard.service'"
+echo ""
