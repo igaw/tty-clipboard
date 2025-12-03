@@ -126,3 +126,11 @@ test('no-self-echo',
   is_parallel: false,
 )
 
+test('update_ssh_localforward',
+     find_program('bash'),
+     args: [
+         meson.project_source_root() / 'tests/test_update_ssh_localforward.sh',
+         meson.project_build_root(),
+         meson.project_source_root() / 'scripts/update_ssh_localforward.py'
+     ]
+)
