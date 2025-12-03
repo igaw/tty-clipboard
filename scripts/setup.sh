@@ -15,8 +15,9 @@ Arguments:
     build_dir       Path to the build directory containing the binaries (default: .build)
 
 Options:
-    -p, --port PORT Local port for SSH LocalForward (default: auto-detect)
-    -h, --help      Show this help message
+    -p, --port PORT      Local port for SSH LocalForward (default: auto-detect)
+    -w, --wayland-bridge Install and configure Wayland clipboard bridge service
+    -h, --help           Show this help message
 
 This script will:
   1. Check if certificates exist locally, generate them if needed
@@ -25,12 +26,14 @@ This script will:
   4. Copy server and client binaries to remote ~/.local/bin
   5. Create a systemd user service to start the server on login
   6. Update local ~/.ssh/config with LocalForward (if hostname entry exists)
+  7. Optionally install Wayland bridge systemd service (-w flag)
 
 Example:
     $0 myserver.example.com
     $0 myserver.example.com ./builddir
-    $0 -p 5458 server2.com          # Use specific local port
+    $0 -p 5458 server2.com               # Use specific local port
     $0 --port 5459 user@server3.com
+    $0 -w myserver.example.com           # Also install Wayland bridge
 
 Note: By default, ports are auto-detected. If a host already has a LocalForward
       configured, that port is reused. Otherwise, the next available port starting
@@ -47,12 +50,17 @@ if [[ $# -lt 1 ]]; then
 fi
 
 LOCAL_PORT=""
+INSTALL_WAYLAND_BRIDGE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         -p|--port)
             LOCAL_PORT="$2"
             shift 2
+            ;;
+        -w|--wayland-bridge)
+            INSTALL_WAYLAND_BRIDGE=true
+            shift
             ;;
         -h|--help)
             show_usage
@@ -262,6 +270,75 @@ echo "  Binaries location: ~/.local/bin/"
 echo "  Certificates location: ~/.config/tty-clipboard/"
 echo "  Service: tty-clipboard.service (systemd user service)"
 echo ""
+
+# Install Wayland bridge if requested
+if [ "$INSTALL_WAYLAND_BRIDGE" = true ]; then
+    echo "=========================================="
+    echo "Installing Wayland bridge..."
+    echo "=========================================="
+    echo ""
+    
+    # Check if wl-clipboard is installed
+    if ! command -v wl-copy &> /dev/null || ! command -v wl-paste &> /dev/null; then
+        echo "⚠ Warning: wl-clipboard not found. Please install it:"
+        echo "  Debian/Ubuntu: sudo apt install wl-clipboard"
+        echo "  Fedora:        sudo dnf install wl-clipboard"
+        echo "  Arch:          sudo pacman -S wl-clipboard"
+        echo ""
+    fi
+    
+    # Copy wayland-bridge.sh script
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    cp "$SCRIPT_DIR/wayland-bridge.sh" "$HOME/.local/bin/"
+    chmod +x "$HOME/.local/bin/wayland-bridge.sh"
+    echo "✓ Wayland bridge script installed to ~/.local/bin/wayland-bridge.sh"
+    
+    # Create systemd user service for Wayland bridge
+    mkdir -p "$HOME/.config/systemd/user"
+    
+    cat > "$HOME/.config/systemd/user/tty-clipboard-bridge.service" << 'BRIDGEEOF'
+[Unit]
+Description=Wayland Clipboard Bridge for tty-clipboard
+Documentation=https://github.com/igaw/tty-clipboard
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/wayland-bridge.sh localhost
+ExecStop=%h/.local/bin/wayland-bridge.sh --stop
+Restart=on-failure
+RestartSec=5
+Environment="WAYLAND_DISPLAY=wayland-0"
+
+[Install]
+WantedBy=default.target
+BRIDGEEOF
+    
+    echo "✓ Systemd service created: tty-clipboard-bridge.service"
+    
+    # Enable and start the service
+    systemctl --user daemon-reload
+    systemctl --user enable tty-clipboard-bridge.service
+    systemctl --user start tty-clipboard-bridge.service
+    
+    echo "✓ Wayland bridge service enabled and started"
+    echo ""
+    echo "Wayland bridge setup complete!"
+    echo "  Script: ~/.local/bin/wayland-bridge.sh"
+    echo "  Service: tty-clipboard-bridge.service"
+    echo ""
+    echo "The bridge syncs clipboard bidirectionally:"
+    echo "  • Copy in GUI apps → available in terminal"
+    echo "  • Copy in terminal → available in GUI apps"
+    echo ""
+    echo "Manage the service:"
+    echo "  Status:  systemctl --user status tty-clipboard-bridge.service"
+    echo "  Logs:    journalctl --user -u tty-clipboard-bridge.service -f"
+    echo "  Stop:    systemctl --user stop tty-clipboard-bridge.service"
+    echo "  Restart: systemctl --user restart tty-clipboard-bridge.service"
+    echo ""
+fi
+
 echo "To use the clipboard:"
 echo "  1. Connect with SSH (port forwarding will be automatic if configured above)"
 echo "  2. Use tty-cb-client with localhost:${LOCAL_PORT}:"
