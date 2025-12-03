@@ -93,8 +93,11 @@ fi
 
 echo "Using local certificates from: $LOCAL_CFG_BASE"
 
-# Remote paths
-REMOTE_CFG_BASE="\${XDG_CONFIG_HOME:-\$HOME/.config}/tty-clipboard"
+# Remote paths (will be expanded on remote host)
+REMOTE_BIN_DIR="\$HOME/.local/bin"
+REMOTE_CONFIG_DIR="\$HOME/.config"
+REMOTE_CERT_DIR="\$HOME/.config/tty-clipboard/certs"
+REMOTE_KEY_DIR="\$HOME/.config/tty-clipboard/keys"
 
 echo ""
 echo "Installing tty-clipboard server on $REMOTE_HOST..."
@@ -102,32 +105,32 @@ echo ""
 
 # Create remote directories
 echo "Creating remote directories..."
-ssh "$REMOTE_HOST" "mkdir -p ~/.local/bin $REMOTE_CFG_BASE/certs $REMOTE_CFG_BASE/keys"
+ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "mkdir -p ~/.local/bin ~/.config/tty-clipboard/certs ~/.config/tty-clipboard/keys"
 
 # Copy certificates to remote host
 echo "Copying certificates to remote host..."
 scp "$LOCAL_CERT_DIR/ca.crt" \
     "$LOCAL_CERT_DIR/server.crt" \
     "$LOCAL_CERT_DIR/client.crt" \
-    "$REMOTE_HOST:$REMOTE_CFG_BASE/certs/"
+    "$REMOTE_HOST:.config/tty-clipboard/certs/"
 
 scp "$LOCAL_KEY_DIR/ca.key" \
     "$LOCAL_KEY_DIR/server.key" \
     "$LOCAL_KEY_DIR/client.key" \
-    "$REMOTE_HOST:$REMOTE_CFG_BASE/keys/"
+    "$REMOTE_HOST:.config/tty-clipboard/keys/"
 
 # Set appropriate permissions on remote keys
 echo "Setting certificate permissions..."
-ssh "$REMOTE_HOST" "chmod 600 $REMOTE_CFG_BASE/keys/*.key"
+ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "chmod 600 ~/.config/tty-clipboard/keys/*.key"
 
 # Copy binaries to remote host
 echo "Copying binaries to remote host..."
 scp "$SERVER_BIN" "$CLIENT_BIN" "$REMOTE_HOST:~/.local/bin/"
-ssh "$REMOTE_HOST" "chmod +x ~/.local/bin/tty-cb-server ~/.local/bin/tty-cb-client"
+ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "chmod +x ~/.local/bin/tty-cb-server ~/.local/bin/tty-cb-client"
 
 # Create systemd user service
 echo "Creating systemd user service..."
-ssh "$REMOTE_HOST" "mkdir -p ~/.config/systemd/user"
+ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "mkdir -p ~/.config/systemd/user"
 
 # Generate the service file content
 SERVICE_CONTENT='[Unit]
@@ -145,22 +148,22 @@ WantedBy=default.target
 '
 
 # Write service file to remote host
-ssh "$REMOTE_HOST" "cat > ~/.config/systemd/user/tty-clipboard.service" << EOF
+ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "cat > ~/.config/systemd/user/tty-clipboard.service" << EOF
 $SERVICE_CONTENT
 EOF
 
 # Enable and start the service
 echo "Enabling and starting the service..."
-ssh "$REMOTE_HOST" "systemctl --user daemon-reload && \
+ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "systemctl --user daemon-reload && \
                      systemctl --user enable tty-clipboard.service && \
                      systemctl --user restart tty-clipboard.service"
 
 # Check service status
 echo ""
 echo "Checking service status..."
-if ssh "$REMOTE_HOST" "systemctl --user is-active --quiet tty-clipboard.service"; then
+if ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "systemctl --user is-active --quiet tty-clipboard.service"; then
     echo "✓ Service is running"
-    ssh "$REMOTE_HOST" "systemctl --user status tty-clipboard.service --no-pager -l"
+    ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "systemctl --user status tty-clipboard.service --no-pager -l"
 else
     echo "✗ Service failed to start"
     echo "Check logs with: ssh $REMOTE_HOST 'journalctl --user -u tty-clipboard.service'"
