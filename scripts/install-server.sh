@@ -103,30 +103,35 @@ echo ""
 echo "Installing tty-clipboard server on $REMOTE_HOST..."
 echo ""
 
+# Get remote home directory (to avoid ~ expansion issues with scp)
+echo "Querying remote home directory..."
+REMOTE_HOME=$(ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" 'echo $HOME')
+if [ -z "$REMOTE_HOME" ]; then
+    echo "Error: Could not determine remote home directory"
+    exit 1
+fi
+echo "Remote home directory: $REMOTE_HOME"
+
 # Create remote directories
 echo "Creating remote directories..."
-ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" 'mkdir -p ~/.local/bin ~/.config/tty-clipboard/certs ~/.config/tty-clipboard/keys'
+ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "mkdir -p $REMOTE_HOME/.local/bin $REMOTE_HOME/.config/tty-clipboard/certs $REMOTE_HOME/.config/tty-clipboard/keys"
 
 # Copy certificates to remote host
 echo "Copying certificates to remote host..."
-scp "$LOCAL_CERT_DIR/ca.crt" \
-    "$LOCAL_CERT_DIR/server.crt" \
-    "$LOCAL_CERT_DIR/client.crt" \
-    "$REMOTE_HOST:~/.config/tty-clipboard/certs/"
+scp -o "ExitOnForwardFailure=no" "$LOCAL_CERT_DIR"/ca.crt "$LOCAL_CERT_DIR"/server.crt "$LOCAL_CERT_DIR"/client.crt \
+    "$REMOTE_HOST:$REMOTE_HOME/.config/tty-clipboard/certs/"
 
-scp "$LOCAL_KEY_DIR/ca.key" \
-    "$LOCAL_KEY_DIR/server.key" \
-    "$LOCAL_KEY_DIR/client.key" \
-    "$REMOTE_HOST:~/.config/tty-clipboard/keys/"
+scp -o "ExitOnForwardFailure=no" "$LOCAL_KEY_DIR"/ca.key "$LOCAL_KEY_DIR"/server.key "$LOCAL_KEY_DIR"/client.key \
+    "$REMOTE_HOST:$REMOTE_HOME/.config/tty-clipboard/keys/"
 
-# Set appropriate permissions on remote keys
+# Set appropriate permissions on remote files
 echo "Setting certificate permissions..."
-ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "chmod 600 ~/.config/tty-clipboard/keys/*.key"
+ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "chmod 644 $REMOTE_HOME/.config/tty-clipboard/certs/*.crt && chmod 600 $REMOTE_HOME/.config/tty-clipboard/keys/*.key"
 
 # Copy binaries to remote host
 echo "Copying binaries to remote host..."
-scp "$SERVER_BIN" "$CLIENT_BIN" "$REMOTE_HOST:~/.local/bin/"
-ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "chmod +x ~/.local/bin/tty-cb-server ~/.local/bin/tty-cb-client"
+scp -o "ExitOnForwardFailure=no" "$SERVER_BIN" "$CLIENT_BIN" "$REMOTE_HOST:$REMOTE_HOME/.local/bin/"
+ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "chmod 755 $REMOTE_HOME/.local/bin/tty-cb-server $REMOTE_HOME/.local/bin/tty-cb-client"
 
 # Create systemd user service
 echo "Creating systemd user service..."

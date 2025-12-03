@@ -144,6 +144,10 @@ openssl x509 -req -in "$CERT_DIR/client.csr" -CA "$CERT_DIR/ca.crt" -CAkey "$KEY
 # Clean up CSR and config files as they are no longer needed
 rm -f "$CERT_DIR/server.csr" "$CERT_DIR/client.csr" "$CERT_DIR/openssl.cnf"
 
+# Set secure permissions
+chmod 600 "$KEY_DIR"/*.key
+chmod 644 "$CERT_DIR"/*.crt
+
 echo "Certificates created in: $CFG_BASE"
 echo "  CA:       $CERT_DIR/ca.crt (key: $KEY_DIR/ca.key)"
 echo "  Server:   $CERT_DIR/server.crt (key: $KEY_DIR/server.key)"
