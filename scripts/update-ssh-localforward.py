@@ -2,6 +2,56 @@
 import argparse
 from pathlib import Path
 import sys
+import re
+
+def detect_port_for_host(config_path, host):
+    """
+    Detect the port to use for a given host.
+    Returns (host, port) tuple.
+    
+    If host already has LocalForward configured, return that port.
+    Otherwise, find the next available port starting from 5457.
+    """
+    if not config_path.exists():
+        return (host, 5457)
+    
+    lines = config_path.read_text().splitlines()
+    used_ports = set()
+    host_port = None
+    current_host = None
+    
+    for line in lines:
+        stripped = line.strip()
+        
+        # Detect Host line
+        if stripped.lower().startswith("host "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) > 1:
+                current_host = parts[1]
+        
+        # Detect LocalForward line
+        if stripped.lower().startswith("localforward"):
+            # Parse: LocalForward 127.0.0.1:5457 127.0.0.1:5457
+            # or: LocalForward [127.0.0.1]:5457 127.0.0.1:5457
+            match = re.search(r'127\.0\.0\.1[:\]](\d+)', stripped)
+            if match:
+                port = int(match.group(1))
+                used_ports.add(port)
+                
+                # If this is our target host, remember its port
+                if current_host == host:
+                    host_port = port
+    
+    # If host already has a port, return it
+    if host_port is not None:
+        return (host, host_port)
+    
+    # Find next available port starting from 5457
+    next_port = 5457
+    while next_port in used_ports:
+        next_port += 1
+    
+    return (host, next_port)
 
 def main():
     parser = argparse.ArgumentParser(
@@ -10,7 +60,8 @@ def main():
     parser.add_argument("host", help="Host alias in SSH config")
     parser.add_argument(
         "localforward",
-        help='LocalForward value (e.g. "127.0.0.1:5457 127.0.0.1:5457")'
+        nargs='?',
+        help='LocalForward value (e.g. "127.0.0.1:5457 127.0.0.1:5457"). Not required with --detect-port'
     )
     parser.add_argument(
         "--config",
@@ -18,11 +69,27 @@ def main():
         default=Path.home() / ".ssh" / "config",
         help="Path to SSH config file (default: ~/.ssh/config)"
     )
+    parser.add_argument(
+        "--detect-port",
+        action="store_true",
+        help="Detect and print the port to use for this host (existing or next available)"
+    )
     args = parser.parse_args()
 
     host = args.host
-    forward_value = args.localforward
     config_path = args.config
+    
+    # Handle port detection mode
+    if args.detect_port:
+        detected_host, detected_port = detect_port_for_host(config_path, host)
+        print(f"{detected_host}:{detected_port}")
+        return
+
+    # Normal update mode - localforward is required
+    if not args.localforward:
+        parser.error("localforward argument is required when not using --detect-port")
+    
+    forward_value = args.localforward
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     if not config_path.exists():

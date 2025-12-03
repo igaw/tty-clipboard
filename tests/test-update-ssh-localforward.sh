@@ -149,6 +149,83 @@ else
     test_failed=$((test_failed + 1))
 fi
 
+# Test 4: Detect port for host with existing LocalForward
+echo ""
+echo "=== Test 4: Detect port for host with existing LocalForward ==="
+cat > "$TEST_CONFIG" <<'EOF'
+Host server1
+    HostName server1.example.com
+    LocalForward 127.0.0.1:5457 127.0.0.1:5457
+
+Host server2
+    HostName server2.example.com
+    LocalForward 127.0.0.1:5458 127.0.0.1:5457
+
+Host server3
+    HostName server3.example.com
+EOF
+
+RESULT=$(python3 "$SCRIPT" server2 --detect-port --config "$TEST_CONFIG")
+if [ "$RESULT" = "server2:5458" ]; then
+    echo "✓ Test 4 passed (detected existing port)"
+    test_passed=$((test_passed + 1))
+else
+    echo "✗ Test 4 failed (expected 'server2:5458', got '$RESULT')"
+    test_failed=$((test_failed + 1))
+fi
+
+# Test 5: Detect next available port for new host
+echo ""
+echo "=== Test 5: Detect next available port for new host ==="
+# server3 has no LocalForward, so should get next available port (5459)
+RESULT=$(python3 "$SCRIPT" server3 --detect-port --config "$TEST_CONFIG")
+if [ "$RESULT" = "server3:5459" ]; then
+    echo "✓ Test 5 passed (detected next available port)"
+    test_passed=$((test_passed + 1))
+else
+    echo "✗ Test 5 failed (expected 'server3:5459', got '$RESULT')"
+    test_failed=$((test_failed + 1))
+fi
+
+# Test 6: Detect port for completely new host with no config
+echo ""
+echo "=== Test 6: Detect port for new host when config is empty ==="
+cat > "$TEST_CONFIG" <<'EOF'
+EOF
+
+RESULT=$(python3 "$SCRIPT" newserver --detect-port --config "$TEST_CONFIG")
+if [ "$RESULT" = "newserver:5457" ]; then
+    echo "✓ Test 6 passed (detected default port)"
+    test_passed=$((test_passed + 1))
+else
+    echo "✗ Test 6 failed (expected 'newserver:5457', got '$RESULT')"
+    test_failed=$((test_failed + 1))
+fi
+
+# Test 7: Detect port skips gaps in port sequence
+echo ""
+echo "=== Test 7: Detect port with gaps in sequence ==="
+cat > "$TEST_CONFIG" <<'EOF'
+Host server1
+    LocalForward 127.0.0.1:5457 127.0.0.1:5457
+
+Host server2
+    LocalForward 127.0.0.1:5459 127.0.0.1:5457
+
+Host server3
+    HostName server3.example.com
+EOF
+
+# Should detect 5458 (the gap between 5457 and 5459)
+RESULT=$(python3 "$SCRIPT" server3 --detect-port --config "$TEST_CONFIG")
+if [ "$RESULT" = "server3:5458" ]; then
+    echo "✓ Test 7 passed (detected port filling gap)"
+    test_passed=$((test_passed + 1))
+else
+    echo "✗ Test 7 failed (expected 'server3:5458', got '$RESULT')"
+    test_failed=$((test_failed + 1))
+fi
+
 # Summary
 echo ""
 echo "==================================="

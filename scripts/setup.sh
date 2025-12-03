@@ -15,6 +15,7 @@ Arguments:
     build_dir       Path to the build directory containing the binaries (default: .build)
 
 Options:
+    -p, --port PORT Local port for SSH LocalForward (default: auto-detect)
     -h, --help      Show this help message
 
 This script will:
@@ -28,7 +29,12 @@ This script will:
 Example:
     $0 myserver.example.com
     $0 myserver.example.com ./builddir
-    $0 user@server.com .build
+    $0 -p 5458 server2.com          # Use specific local port
+    $0 --port 5459 user@server3.com
+
+Note: By default, ports are auto-detected. If a host already has a LocalForward
+      configured, that port is reused. Otherwise, the next available port starting
+      from 5457 is assigned. Use -p to override and specify a custom port.
 
 EOF
 }
@@ -40,8 +46,14 @@ if [[ $# -lt 1 ]]; then
     exit 1
 fi
 
+LOCAL_PORT=""
+
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -p|--port)
+            LOCAL_PORT="$2"
+            shift 2
+            ;;
         -h|--help)
             show_usage
             exit 0
@@ -196,7 +208,6 @@ fi
 
 # Update SSH config with LocalForward
 echo ""
-echo "Updating SSH config with LocalForward..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SSH_CONFIG="${HOME}/.ssh/config"
 
@@ -207,9 +218,21 @@ chmod 700 "${HOME}/.ssh/sockets"
 # Extract just the hostname part (without user@) for SSH config lookup
 HOSTNAME_ONLY="${REMOTE_HOST##*@}"
 
+# Auto-detect port if not specified
+if [ -z "$LOCAL_PORT" ]; then
+    echo "Auto-detecting local port for '$HOSTNAME_ONLY'..."
+    PORT_RESULT=$(python3 "$SCRIPT_DIR/update-ssh-localforward.py" "$HOSTNAME_ONLY" --detect-port)
+    LOCAL_PORT=$(echo "$PORT_RESULT" | cut -d: -f2)
+    echo "Using local port: $LOCAL_PORT"
+else
+    echo "Using specified local port: $LOCAL_PORT"
+fi
+
+echo "Updating SSH config with LocalForward..."
+
 if [ -f "$SSH_CONFIG" ] && grep -q "^Host.*\b${HOSTNAME_ONLY}\b" "$SSH_CONFIG"; then
     echo "Found SSH config entry for '$HOSTNAME_ONLY', adding LocalForward and ControlMaster..."
-    python3 "$SCRIPT_DIR/update-ssh-localforward.py" "$HOSTNAME_ONLY" "127.0.0.1:5457 127.0.0.1:5457"
+    python3 "$SCRIPT_DIR/update-ssh-localforward.py" "$HOSTNAME_ONLY" "127.0.0.1:${LOCAL_PORT} 127.0.0.1:5457"
     echo "✓ SSH config updated"
 else
     echo "⚠ No SSH config entry found for '$HOSTNAME_ONLY'"
@@ -218,13 +241,13 @@ else
     echo ""
     echo "Host $HOSTNAME_ONLY"
     echo "    HostName $HOSTNAME_ONLY"
-    echo "    LocalForward 127.0.0.1:5457 127.0.0.1:5457"
+    echo "    LocalForward 127.0.0.1:${LOCAL_PORT} 127.0.0.1:5457"
     echo "    ControlMaster auto"
     echo "    ControlPath ~/.ssh/sockets/%r@%h:%p"
     echo "    ControlPersist 10m"
     echo ""
     echo "Or connect manually with port forwarding:"
-    echo "    ssh -L 127.0.0.1:5457:127.0.0.1:5457 $REMOTE_HOST"
+    echo "    ssh -L 127.0.0.1:${LOCAL_PORT}:127.0.0.1:5457 $REMOTE_HOST"
 fi
 
 echo ""
@@ -233,6 +256,7 @@ echo "Setup complete!"
 echo "=========================================="
 echo ""
 echo "Local client installed: ~/.local/bin/tty-cb-client"
+echo "Local port forward: 127.0.0.1:${LOCAL_PORT} -> ${REMOTE_HOST}:5457"
 echo "Server installed on: $REMOTE_HOST"
 echo "  Binaries location: ~/.local/bin/"
 echo "  Certificates location: ~/.config/tty-clipboard/"
@@ -240,8 +264,12 @@ echo "  Service: tty-clipboard.service (systemd user service)"
 echo ""
 echo "To use the clipboard:"
 echo "  1. Connect with SSH (port forwarding will be automatic if configured above)"
-echo "  2. Use tty-cb-client to copy/paste:"
-echo "     echo 'hello' | tty-cb-client write"
+echo "  2. Use tty-cb-client with localhost:${LOCAL_PORT}:"
+echo "     echo 'hello' | tty-cb-client write localhost"
+echo "     tty-cb-client read localhost"
+echo ""
+echo "Note: When connecting to this server, use localhost:${LOCAL_PORT} for tty-cb-client."
+echo "      Each remote server should use a different local port (5457, 5458, 5459, etc.)"
 echo "     tty-cb-client read"
 echo ""
 echo "Useful commands:"
