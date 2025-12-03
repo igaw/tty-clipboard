@@ -189,3 +189,27 @@ This allows seamless clipboard sharing between:
 - Local terminal → remote tmux session
 - Remote tmux session → local terminal
 - Multiple remote sessions via the same clipboard server
+
+## tig Integration
+
+Integrate tty-clipboard with [tig](https://jonas.github.io/tig/) (text-mode interface for Git) to quickly copy commit information.
+
+Add these bindings to your `~/.tigrc`:
+
+```
+# Copy commit message to clipboard
+bind main C @sh -c "git log --format=%B -n 1 %(commit) | tty-cb-client write localhost"
+
+# Copy commit hash to clipboard
+bind generic I @sh -c "echo -n %(commit) | tty-cb-client write localhost"
+
+# Copy short hash with subject to clipboard
+bind generic O @sh -c "git show -s --pretty='format:%h (\"%s\")' --abbrev=12 %(commit) | tty-cb-client write localhost"
+```
+
+**Usage in tig:**
+- `Shift+C` - Copy the full commit message of the selected commit
+- `Shift+I` - Copy the commit hash (SHA) to clipboard
+- `Shift+O` - Copy short hash with subject line (e.g., `abc123456789 ("Fix bug")`)
+
+These bindings work in any tig view where commits are displayed (main, log, diff, etc.).
