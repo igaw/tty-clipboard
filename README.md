@@ -94,6 +94,48 @@ brew install cmake autoconf automake libtool git
 
 ## Installation
 
+### Automated Setup (Recommended)
+
+For easy setup of both the local client and remote server:
+
+```bash
+# Dynamic build (requires compatible mbedTLS/protobuf-c on both hosts)
+meson setup .build
+ninja -C .build
+./scripts/setup.sh <remote-hostname>
+
+# OR: Static build (portable, works across different distributions)
+meson setup .build -Dstatic=true --force-fallback-for=mbedtls,libprotobuf-c
+ninja -C .build
+./scripts/setup.sh <remote-hostname>
+```
+
+This script will:
+1. Generate TLS certificates if they don't exist
+2. Install the client binary to `~/.local/bin/` locally
+3. Copy certificates and binaries to the remote host
+4. Set up a systemd user service on the remote host
+5. Configure SSH with LocalForward and ControlMaster
+
+**Example:**
+```bash
+./scripts/setup.sh myserver.example.com
+./scripts/setup.sh user@server.com ./builddir
+```
+
+**Note:** Dynamic builds assume both local and remote systems have compatible runtime libraries. For maximum portability across different distributions or versions, use the static build (`-Dstatic=true`).
+
+Make sure `~/.local/bin` is in your `PATH`.
+
+### Manual Installation
+
 ```bash
 sudo ninja -C builddir install
 ```
+
+For manual setup, you'll need to:
+1. Generate certificates using `./scripts/create-certs.sh`
+2. Copy certificates to remote host
+3. Set up SSH port forwarding in `~/.ssh/config`
+
+See [USAGE.md](USAGE.md) for detailed manual setup instructions.

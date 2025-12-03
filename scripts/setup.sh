@@ -2,29 +2,31 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -euo pipefail
 
-# Script to install tty-clipboard server on a remote host
+# Script to set up tty-clipboard: install client locally and server on remote host
 
 show_usage() {
     cat << EOF
-Usage: $0 [OPTIONS] <hostname> <build_dir>
+Usage: $0 [OPTIONS] <hostname> [build_dir]
 
-Install tty-clipboard server on a remote host.
+Set up tty-clipboard by installing the client locally and server on a remote host.
 
 Arguments:
     hostname        SSH hostname or user@hostname of the remote host
-    build_dir       Path to the build directory containing the binaries
+    build_dir       Path to the build directory containing the binaries (default: .build)
 
 Options:
     -h, --help      Show this help message
 
 This script will:
   1. Check if certificates exist locally, generate them if needed
-  2. Copy certificates to the remote host
-  3. Copy server and client binaries to remote ~/.local/bin
-  4. Create a systemd user service to start the server on login
-  5. Update local ~/.ssh/config with LocalForward (if hostname entry exists)
+  2. Install client binary to local ~/.local/bin
+  3. Copy certificates to the remote host
+  4. Copy server and client binaries to remote ~/.local/bin
+  5. Create a systemd user service to start the server on login
+  6. Update local ~/.ssh/config with LocalForward (if hostname entry exists)
 
 Example:
+    $0 myserver.example.com
     $0 myserver.example.com ./builddir
     $0 user@server.com .build
 
@@ -32,7 +34,7 @@ EOF
 }
 
 # Parse arguments
-if [[ $# -lt 2 ]]; then
+if [[ $# -lt 1 ]]; then
     echo "Error: Missing required arguments"
     show_usage
     exit 1
@@ -56,7 +58,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 REMOTE_HOST="$1"
-BUILD_DIR="$2"
+BUILD_DIR="${2:-.build}"  # Default to .build if not specified
 
 if [ ! -d "$BUILD_DIR" ]; then
     echo "Error: Build directory '$BUILD_DIR' does not exist"
@@ -92,6 +94,14 @@ if [ ! -f "$LOCAL_CERT_DIR/ca.crt" ] || [ ! -f "$LOCAL_CERT_DIR/server.crt" ] ||
 fi
 
 echo "Using local certificates from: $LOCAL_CFG_BASE"
+
+# Install client locally
+echo ""
+echo "Installing client locally..."
+mkdir -p "$HOME/.local/bin"
+cp "$CLIENT_BIN" "$HOME/.local/bin/tty-cb-client"
+chmod 755 "$HOME/.local/bin/tty-cb-client"
+echo "✓ Client installed to ~/.local/bin/tty-cb-client"
 
 # Remote paths (will be expanded on remote host)
 REMOTE_BIN_DIR="\$HOME/.local/bin"
@@ -218,13 +228,14 @@ fi
 
 echo ""
 echo "=========================================="
-echo "Installation complete!"
+echo "Setup complete!"
 echo "=========================================="
 echo ""
+echo "Local client installed: ~/.local/bin/tty-cb-client"
 echo "Server installed on: $REMOTE_HOST"
-echo "Binaries location: ~/.local/bin/"
-echo "Certificates location: ~/.config/tty-clipboard/"
-echo "Service: tty-clipboard.service (systemd user service)"
+echo "  Binaries location: ~/.local/bin/"
+echo "  Certificates location: ~/.config/tty-clipboard/"
+echo "  Service: tty-clipboard.service (systemd user service)"
 echo ""
 echo "To use the clipboard:"
 echo "  1. Connect with SSH (port forwarding will be automatic if configured above)"
