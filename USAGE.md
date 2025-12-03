@@ -213,3 +213,42 @@ bind generic O @sh -c "git show -s --pretty='format:%h (\"%s\")' --abbrev=12 %(c
 - `Shift+O` - Copy short hash with subject line (e.g., `abc123456789 ("Fix bug")`)
 
 These bindings work in any tig view where commits are displayed (main, log, diff, etc.).
+
+## Doom Emacs Integration
+
+Integrate tty-clipboard with Doom Emacs to sync the kill-ring (Emacs clipboard) with your system clipboard.
+
+Add this configuration to your `~/.doom.d/config.el`:
+
+```elisp
+;; tty-clipboard integration for Doom Emacs
+(defun tty-clipboard-copy (text)
+  "Copy TEXT to tty-clipboard."
+  (let ((process-connection-type nil))
+    (let ((proc (start-process "tty-cb-copy" nil
+                               "tty-cb-client" "write")))
+      (process-send-string proc text)
+      (process-send-eof proc))))
+
+(defun tty-clipboard-paste ()
+  "Paste from tty-clipboard."
+  (with-temp-buffer
+    (call-process "tty-cb-client" nil t nil "read")
+    (buffer-string)))
+
+;; Hook into Emacs clipboard functions
+(setq interprogram-cut-function #'tty-clipboard-copy)
+(setq interprogram-paste-function #'tty-clipboard-paste)
+```
+
+After adding this configuration, reload your Doom config:
+```
+SPC h r r  (or M-x doom/reload)
+```
+
+**Usage:**
+- Copy in Emacs (`y` in evil mode, `M-w` in Emacs mode) → automatically sent to tty-clipboard
+- Paste in Emacs (`p` in evil mode, `C-y` in Emacs mode) → pulls from tty-clipboard
+- Works bidirectionally with tmux, tig, and other integrated tools
+
+**Note:** This integrates with Emacs' kill-ring, so all standard Emacs copy/paste operations will use tty-clipboard automatically. For Doom Emacs specifically, this works seamlessly with evil-mode yanking and pasting.
