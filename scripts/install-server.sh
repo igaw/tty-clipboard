@@ -128,6 +128,13 @@ scp -o "ExitOnForwardFailure=no" "$LOCAL_KEY_DIR"/ca.key "$LOCAL_KEY_DIR"/server
 echo "Setting certificate permissions..."
 ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "chmod 644 $REMOTE_HOME/.config/tty-clipboard/certs/*.crt && chmod 600 $REMOTE_HOME/.config/tty-clipboard/keys/*.key" 2>/dev/null
 
+# Stop the service if it exists (so binaries can be updated)
+echo "Checking for existing service..."
+if ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "systemctl --user is-enabled --quiet tty-clipboard.service" 2>/dev/null; then
+    echo "Stopping existing service..."
+    ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "systemctl --user stop tty-clipboard.service" 2>/dev/null
+fi
+
 # Copy binaries to remote host
 echo "Copying binaries to remote host..."
 scp -o "ExitOnForwardFailure=no" "$SERVER_BIN" "$CLIENT_BIN" "$REMOTE_HOST:$REMOTE_HOME/.local/bin/"
