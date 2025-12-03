@@ -105,7 +105,7 @@ echo ""
 
 # Get remote home directory (to avoid ~ expansion issues with scp)
 echo "Querying remote home directory..."
-REMOTE_HOME=$(ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" 'echo $HOME')
+REMOTE_HOME=$(ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" 'echo $HOME' 2>/dev/null)
 if [ -z "$REMOTE_HOME" ]; then
     echo "Error: Could not determine remote home directory"
     exit 1
@@ -114,7 +114,7 @@ echo "Remote home directory: $REMOTE_HOME"
 
 # Create remote directories
 echo "Creating remote directories..."
-ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "mkdir -p $REMOTE_HOME/.local/bin $REMOTE_HOME/.config/tty-clipboard/certs $REMOTE_HOME/.config/tty-clipboard/keys"
+ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "mkdir -p $REMOTE_HOME/.local/bin $REMOTE_HOME/.config/tty-clipboard/certs $REMOTE_HOME/.config/tty-clipboard/keys" 2>/dev/null
 
 # Copy certificates to remote host
 echo "Copying certificates to remote host..."
@@ -126,16 +126,16 @@ scp -o "ExitOnForwardFailure=no" "$LOCAL_KEY_DIR"/ca.key "$LOCAL_KEY_DIR"/server
 
 # Set appropriate permissions on remote files
 echo "Setting certificate permissions..."
-ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "chmod 644 $REMOTE_HOME/.config/tty-clipboard/certs/*.crt && chmod 600 $REMOTE_HOME/.config/tty-clipboard/keys/*.key"
+ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "chmod 644 $REMOTE_HOME/.config/tty-clipboard/certs/*.crt && chmod 600 $REMOTE_HOME/.config/tty-clipboard/keys/*.key" 2>/dev/null
 
 # Copy binaries to remote host
 echo "Copying binaries to remote host..."
 scp -o "ExitOnForwardFailure=no" "$SERVER_BIN" "$CLIENT_BIN" "$REMOTE_HOST:$REMOTE_HOME/.local/bin/"
-ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "chmod 755 $REMOTE_HOME/.local/bin/tty-cb-server $REMOTE_HOME/.local/bin/tty-cb-client"
+ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "chmod 755 $REMOTE_HOME/.local/bin/tty-cb-server $REMOTE_HOME/.local/bin/tty-cb-client" 2>/dev/null
 
 # Create systemd user service
 echo "Creating systemd user service..."
-ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "mkdir -p ~/.config/systemd/user"
+ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "mkdir -p ~/.config/systemd/user" 2>/dev/null
 
 # Generate the service file content
 SERVICE_CONTENT='[Unit]
@@ -153,7 +153,7 @@ WantedBy=default.target
 '
 
 # Write service file to remote host
-ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "cat > ~/.config/systemd/user/tty-clipboard.service" << EOF
+ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "cat > ~/.config/systemd/user/tty-clipboard.service" 2>/dev/null << EOF
 $SERVICE_CONTENT
 EOF
 
@@ -161,14 +161,16 @@ EOF
 echo "Enabling and starting the service..."
 ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "systemctl --user daemon-reload && \
                      systemctl --user enable tty-clipboard.service && \
-                     systemctl --user restart tty-clipboard.service"
+                     systemctl --user restart tty-clipboard.service" 2>/dev/null
 
 # Check service status
 echo ""
 echo "Checking service status..."
-if ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "systemctl --user is-active --quiet tty-clipboard.service"; then
+# Give the service a moment to start
+sleep 1
+if ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "systemctl --user is-active --quiet tty-clipboard.service" 2>/dev/null; then
     echo "✓ Service is running"
-    ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "systemctl --user status tty-clipboard.service --no-pager -l"
+    ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "systemctl --user status tty-clipboard.service --no-pager -l" 2>/dev/null
 else
     echo "✗ Service failed to start"
     echo "Check logs with: ssh $REMOTE_HOST 'journalctl --user -u tty-clipboard.service'"
@@ -181,11 +183,14 @@ echo "Updating SSH config with LocalForward..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SSH_CONFIG="${HOME}/.ssh/config"
 
+# Create .ssh/sockets directory for ControlMaster
+mkdir -p "${HOME}/.ssh/sockets"
+
 # Extract just the hostname part (without user@) for SSH config lookup
 HOSTNAME_ONLY="${REMOTE_HOST##*@}"
 
 if [ -f "$SSH_CONFIG" ] && grep -q "^Host.*\b${HOSTNAME_ONLY}\b" "$SSH_CONFIG"; then
-    echo "Found SSH config entry for '$HOSTNAME_ONLY', adding LocalForward..."
+    echo "Found SSH config entry for '$HOSTNAME_ONLY', adding LocalForward and ControlMaster..."
     python3 "$SCRIPT_DIR/update-ssh-localforward.py" "$HOSTNAME_ONLY" "127.0.0.1:5457 127.0.0.1:5457"
     echo "✓ SSH config updated"
 else
@@ -196,6 +201,9 @@ else
     echo "Host $HOSTNAME_ONLY"
     echo "    HostName $HOSTNAME_ONLY"
     echo "    LocalForward 127.0.0.1:5457 127.0.0.1:5457"
+    echo "    ControlMaster auto"
+    echo "    ControlPath ~/.ssh/sockets/%r@%h:%p"
+    echo "    ControlPersist 10m"
     echo ""
     echo "Or connect manually with port forwarding:"
     echo "    ssh -L 127.0.0.1:5457:127.0.0.1:5457 $REMOTE_HOST"

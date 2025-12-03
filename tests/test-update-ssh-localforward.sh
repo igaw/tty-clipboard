@@ -47,6 +47,9 @@ Host foo.name.com
 Host lucisinferno
     HostName lucisinferno.dreamland.dk
     LocalForward 127.0.0.1:5457 127.0.0.1:5457
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h:%p
+    ControlPersist 10m
 
 Host bar.name.com
     IdentityFile ~/.ssh/id_ed25519
@@ -88,6 +91,9 @@ Host foo.name.com
 Host lucisinferno
     HostName lucisinferno.dreamland.dk
     LocalForward 127.0.0.1:5457 127.0.0.1:5457
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h:%p
+    ControlPersist 10m
 
 Host bar.name.com
     IdentityFile ~/.ssh/id_ed25519
@@ -128,6 +134,9 @@ Host bar.name.com
 
 Host newhost
     LocalForward 127.0.0.1:5457 127.0.0.1:5457
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h:%p
+    ControlPersist 10m
 EOF
 
 python3 "$SCRIPT" newhost "127.0.0.1:5457 127.0.0.1:5457" --config "$TEST_CONFIG"

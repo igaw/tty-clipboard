@@ -52,22 +52,44 @@ def main():
                 host_block_lines.append(subline)
                 i += 1
 
-            # Check if LocalForward exists
+            # Check if LocalForward, ControlMaster, ControlPath, ControlPersist exist
             lf_found = False
+            cm_found = False
+            cp_found = False
+            cpers_found = False
+            
             for idx, subline in enumerate(host_block_lines):
-                if subline.strip().lower().startswith("localforward"):
+                stripped_lower = subline.strip().lower()
+                if stripped_lower.startswith("localforward"):
                     host_block_lines[idx] = "    LocalForward " + forward_value
                     lf_found = True
-                    break
+                elif stripped_lower.startswith("controlmaster"):
+                    cm_found = True
+                elif stripped_lower.startswith("controlpath"):
+                    cp_found = True
+                elif stripped_lower.startswith("controlpersist"):
+                    cpers_found = True
 
+            # Insert missing options after last non-blank line
+            insert_idx = len(host_block_lines)
+            for rev_idx in reversed(range(len(host_block_lines))):
+                if host_block_lines[rev_idx].strip() != "":
+                    insert_idx = rev_idx + 1
+                    break
+            
+            options_to_add = []
             if not lf_found:
-                # Insert LocalForward after last non-blank line
-                insert_idx = len(host_block_lines)
-                for rev_idx in reversed(range(len(host_block_lines))):
-                    if host_block_lines[rev_idx].strip() != "":
-                        insert_idx = rev_idx + 1
-                        break
-                host_block_lines.insert(insert_idx, "    LocalForward " + forward_value)
+                options_to_add.append("    LocalForward " + forward_value)
+            if not cm_found:
+                options_to_add.append("    ControlMaster auto")
+            if not cp_found:
+                options_to_add.append("    ControlPath ~/.ssh/sockets/%r@%h:%p")
+            if not cpers_found:
+                options_to_add.append("    ControlPersist 10m")
+            
+            for option in options_to_add:
+                host_block_lines.insert(insert_idx, option)
+                insert_idx += 1
 
             new_lines.extend(host_block_lines)
             localforward_updated = True
@@ -83,10 +105,13 @@ def main():
             new_lines.append("")  # separate from previous block
         new_lines.append(f"Host {host}")
         new_lines.append(f"    LocalForward {forward_value}")
+        new_lines.append("    ControlMaster auto")
+        new_lines.append("    ControlPath ~/.ssh/sockets/%r@%h:%p")
+        new_lines.append("    ControlPersist 10m")
 
     # Write back preserving all spacing
     config_path.write_text("\n".join(new_lines) + "\n")
-    print(f"Host '{host}' updated: LocalForward set to '{forward_value}' in {config_path}")
+    print(f"Host '{host}' updated: LocalForward and ControlMaster configured in {config_path}")
 
 if __name__ == "__main__":
     try:
