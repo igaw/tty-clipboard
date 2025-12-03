@@ -105,19 +105,19 @@ echo ""
 
 # Create remote directories
 echo "Creating remote directories..."
-ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" "mkdir -p ~/.local/bin ~/.config/tty-clipboard/certs ~/.config/tty-clipboard/keys"
+ssh -o "ExitOnForwardFailure=no" "$REMOTE_HOST" 'mkdir -p ~/.local/bin ~/.config/tty-clipboard/certs ~/.config/tty-clipboard/keys'
 
 # Copy certificates to remote host
 echo "Copying certificates to remote host..."
 scp "$LOCAL_CERT_DIR/ca.crt" \
     "$LOCAL_CERT_DIR/server.crt" \
     "$LOCAL_CERT_DIR/client.crt" \
-    "$REMOTE_HOST:.config/tty-clipboard/certs/"
+    "$REMOTE_HOST:~/.config/tty-clipboard/certs/"
 
 scp "$LOCAL_KEY_DIR/ca.key" \
     "$LOCAL_KEY_DIR/server.key" \
     "$LOCAL_KEY_DIR/client.key" \
-    "$REMOTE_HOST:.config/tty-clipboard/keys/"
+    "$REMOTE_HOST:~/.config/tty-clipboard/keys/"
 
 # Set appropriate permissions on remote keys
 echo "Setting certificate permissions..."
