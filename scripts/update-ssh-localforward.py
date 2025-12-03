@@ -44,11 +44,16 @@ def main():
 
             # Collect all lines of this host block
             host_block_lines = []
+            indent = "    "  # default 4 spaces
             while i < len(lines):
                 subline = lines[i]
                 sub_stripped = subline.strip()
                 if sub_stripped.lower().startswith("host "):
                     break
+                # Detect indentation from first indented line
+                if sub_stripped and subline.startswith((" ", "\t")) and indent == "    ":
+                    # Calculate actual indentation
+                    indent = subline[:len(subline) - len(subline.lstrip())]
                 host_block_lines.append(subline)
                 i += 1
 
@@ -61,7 +66,7 @@ def main():
             for idx, subline in enumerate(host_block_lines):
                 stripped_lower = subline.strip().lower()
                 if stripped_lower.startswith("localforward"):
-                    host_block_lines[idx] = "    LocalForward " + forward_value
+                    host_block_lines[idx] = indent + "LocalForward " + forward_value
                     lf_found = True
                 elif stripped_lower.startswith("controlmaster"):
                     cm_found = True
@@ -79,13 +84,13 @@ def main():
             
             options_to_add = []
             if not lf_found:
-                options_to_add.append("    LocalForward " + forward_value)
+                options_to_add.append(indent + "LocalForward " + forward_value)
             if not cm_found:
-                options_to_add.append("    ControlMaster auto")
+                options_to_add.append(indent + "ControlMaster auto")
             if not cp_found:
-                options_to_add.append("    ControlPath ~/.ssh/sockets/%r@%h:%p")
+                options_to_add.append(indent + "ControlPath ~/.ssh/sockets/%r@%h:%p")
             if not cpers_found:
-                options_to_add.append("    ControlPersist 10m")
+                options_to_add.append(indent + "ControlPersist 10m")
             
             for option in options_to_add:
                 host_block_lines.insert(insert_idx, option)
