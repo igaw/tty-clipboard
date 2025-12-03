@@ -2,10 +2,90 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -euo pipefail
 
-# Create certs/keys under XDG config so the binaries can find them.
+# Default config directory
 CFG_BASE=${XDG_CONFIG_HOME:-"$HOME/.config"}/tty-clipboard
 CERT_DIR="$CFG_BASE/certs"
 KEY_DIR="$CFG_BASE/keys"
+
+# Parse command line arguments
+FORCE=false
+SHOW_FINGERPRINTS=false
+
+show_usage() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+Generate TLS certificates and keys for tty-clipboard.
+
+Options:
+    -f, --force             Force regeneration even if certificates exist
+    -p, --fingerprints      Show fingerprints of existing certificates
+    -h, --help              Show this help message
+
+Certificates will be created in:
+    $CFG_BASE/certs/
+    $CFG_BASE/keys/
+
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -f|--force)
+            FORCE=true
+            shift
+            ;;
+        -p|--fingerprints)
+            SHOW_FINGERPRINTS=true
+            shift
+            ;;
+        -h|--help)
+            show_usage
+            exit 0
+            ;;
+        *)
+            echo "Error: Unknown option: $1"
+            show_usage
+            exit 1
+            ;;
+    esac
+done
+
+# If fingerprints requested, show them and exit
+if [ "$SHOW_FINGERPRINTS" = true ]; then
+    if [ ! -f "$CERT_DIR/ca.crt" ] || [ ! -f "$CERT_DIR/server.crt" ] || [ ! -f "$CERT_DIR/client.crt" ]; then
+        echo "Error: Certificates not found in $CERT_DIR"
+        echo "Run without --fingerprints to generate certificates first."
+        exit 1
+    fi
+    
+    echo "Certificate Fingerprints:"
+    echo ""
+    echo "CA Certificate:"
+    openssl x509 -in "$CERT_DIR/ca.crt" -noout -fingerprint -sha256
+    echo ""
+    echo "Server Certificate:"
+    openssl x509 -in "$CERT_DIR/server.crt" -noout -fingerprint -sha256
+    echo ""
+    echo "Client Certificate:"
+    openssl x509 -in "$CERT_DIR/client.crt" -noout -fingerprint -sha256
+    exit 0
+fi
+
+# Check if certificates already exist
+if [ -f "$CERT_DIR/ca.crt" ] && [ -f "$CERT_DIR/server.crt" ] && [ -f "$CERT_DIR/client.crt" ] && \
+   [ -f "$KEY_DIR/ca.key" ] && [ -f "$KEY_DIR/server.key" ] && [ -f "$KEY_DIR/client.key" ]; then
+    if [ "$FORCE" = false ]; then
+        echo "Certificates already exist in: $CFG_BASE"
+        echo "Use --force to regenerate, or --fingerprints to show fingerprints."
+        exit 0
+    else
+        echo "Force regeneration enabled. Removing existing certificates..."
+        rm -f "$CERT_DIR"/{ca.crt,server.crt,client.crt,ca.srl}
+        rm -f "$KEY_DIR"/{ca.key,server.key,client.key}
+    fi
+fi
+
 mkdir -p "$CERT_DIR" "$KEY_DIR"
 
 echo "Using config directory: $CFG_BASE"
