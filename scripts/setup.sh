@@ -202,6 +202,7 @@ SSH_CONFIG="${HOME}/.ssh/config"
 
 # Create .ssh/sockets directory for ControlMaster
 mkdir -p "${HOME}/.ssh/sockets"
+chmod 700 "${HOME}/.ssh/sockets"
 
 # Extract just the hostname part (without user@) for SSH config lookup
 HOSTNAME_ONLY="${REMOTE_HOST##*@}"
