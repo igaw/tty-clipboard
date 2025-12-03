@@ -152,3 +152,40 @@ tty-cb-client read localhost
 # This will wait until new data is written
 tty-cb-client read localhost --sync
 ```
+
+## tmux Integration
+
+Integrate tty-clipboard with tmux for seamless copy/paste between your local machine and remote sessions.
+
+Add these bindings to your `~/.tmux.conf`:
+
+```tmux
+# Copy selection to tty-clipboard
+bind-key -T copy-mode-vi y send-keys -X copy-pipe-and-cancel "tty-cb-client write localhost"
+bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "tty-cb-client write localhost"
+
+# Paste from tty-clipboard
+bind p run-shell 'tty-cb-client read localhost | tmux load-buffer - && tmux paste-buffer'
+```
+
+After adding these, reload your tmux config:
+```bash
+tmux source-file ~/.tmux.conf
+```
+
+**Usage:**
+- In tmux copy mode (`Prefix + [`), select text and press `y` to copy to tty-clipboard
+- Mouse selection also copies to tty-clipboard automatically
+- Press `Prefix + p` to paste from tty-clipboard
+
+**Note:** If you already use `Prefix + p` for something else, rebind window navigation first:
+```tmux
+# Free up p by moving next/previous window to n/m
+bind n select-window -t :+
+bind m select-window -t :-
+```
+
+This allows seamless clipboard sharing between:
+- Local terminal → remote tmux session
+- Remote tmux session → local terminal
+- Multiple remote sessions via the same clipboard server
