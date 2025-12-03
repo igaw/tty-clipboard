@@ -28,7 +28,8 @@
 static void tls_debug(void *ctx, int level, const char *file, int line, const char *msg)
 {
 	(void)ctx;
-	fprintf(stderr, "mbedtls[%d] %s:%d: %s", level, file, line, msg);
+	fprintf(stderr, "mbedtls[%d] %24s:%5d: %s",
+		level, basename(file), line, msg);
 }
 
 
