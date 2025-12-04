@@ -400,7 +400,6 @@ After=graphical-session.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/wayland-bridge.sh localhost ${ALL_PORTS}
-ExecStop=%h/.local/bin/wayland-bridge.sh --stop
 Restart=on-failure
 RestartSec=5
 Environment="WAYLAND_DISPLAY=wayland-0"
