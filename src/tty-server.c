@@ -91,6 +91,8 @@ size_t shared_capacity = 0; // allocated size
 size_t shared_length = 0; // used length
 uint64_t shared_message_id = 0; // message_id of current buffer
 unsigned char shared_write_uuid[UUID_SIZE]; // UUID of the current write
+char shared_hostname[256] = {0}; // Hostname of client that wrote current data
+int64_t shared_timestamp = 0; // Timestamp when data was written
 unsigned int gen = 0;
 pthread_mutex_t buffer_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t buffer_cond = PTHREAD_COND_INITIALIZER;
@@ -348,11 +350,21 @@ static int handle_write_request(mbedtls_ssl_context *ssl, Ttycb__WriteRequest *w
 		memset(shared_write_uuid, 0, UUID_SIZE);
 	}
 	
+	// Store hostname and timestamp for debugging
+	if (write_req->hostname) {
+		strncpy(shared_hostname, write_req->hostname, sizeof(shared_hostname) - 1);
+		shared_hostname[sizeof(shared_hostname) - 1] = '\0';
+	} else {
+		shared_hostname[0] = '\0';
+	}
+	shared_timestamp = write_req->timestamp;
+	
 	gen++;
 	pthread_cond_broadcast(&buffer_cond);
 	pthread_mutex_unlock(&buffer_mutex);
 
-	LOG_INFO("Write completed: %zu bytes, message_id: %lu", len, msg_id);
+	LOG_INFO("Write completed: %zu bytes, message_id: %lu, from: %s", 
+		 len, msg_id, write_req->hostname ? write_req->hostname : "unknown");
 
 	// Send success response with UUID echo
 	Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
@@ -371,11 +383,23 @@ static int handle_read_request(mbedtls_ssl_context *ssl)
 	LOG_DEBUG("Read request received");
 	pthread_mutex_lock(&buffer_mutex);
 	size_t len = shared_length;
-	LOG_INFO("Read completed: %zu bytes, message_id: %lu", len, shared_message_id);
+	uint64_t msg_id = shared_message_id;
+	unsigned char uuid_to_send[UUID_SIZE];
+	memcpy(uuid_to_send, shared_write_uuid, UUID_SIZE);
+	char hostname_to_send[256];
+	strncpy(hostname_to_send, shared_hostname, sizeof(hostname_to_send));
+	int64_t timestamp_to_send = shared_timestamp;
+	
+	LOG_INFO("Read completed: %zu bytes, message_id: %lu", len, msg_id);
 	Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
 	Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
 	df.data.len = len;
 	df.data.data = (uint8_t *)shared_buffer;
+	df.message_id = msg_id;
+	df.write_uuid.data = uuid_to_send;
+	df.write_uuid.len = UUID_SIZE;
+	df.hostname = hostname_to_send;
+	df.timestamp = timestamp_to_send;
 	resp.data = &df;
 	resp.body_case = TTYCB__ENVELOPE__BODY_DATA;
 
@@ -429,6 +453,9 @@ static int handle_subscribe_request(mbedtls_ssl_context *ssl, Ttycb__SubscribeRe
 		uint64_t msg_id = shared_message_id;
 		unsigned char uuid_to_send[UUID_SIZE];
 		memcpy(uuid_to_send, shared_write_uuid, UUID_SIZE);
+		char hostname_to_send[256];
+		strncpy(hostname_to_send, shared_hostname, sizeof(hostname_to_send));
+		int64_t timestamp_to_send = shared_timestamp;
 		last_sent_message_id = msg_id;
 		memcpy(last_sent_uuid, uuid_to_send, UUID_SIZE);
 
@@ -439,6 +466,8 @@ static int handle_subscribe_request(mbedtls_ssl_context *ssl, Ttycb__SubscribeRe
 		df.message_id = msg_id;
 		df.write_uuid.data = uuid_to_send;
 		df.write_uuid.len = UUID_SIZE;
+		df.hostname = hostname_to_send;
+		df.timestamp = timestamp_to_send;
 		resp.data = &df;
 		resp.body_case = TTYCB__ENVELOPE__BODY_DATA;
 

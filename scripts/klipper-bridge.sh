@@ -243,13 +243,20 @@ debug_log "Starting TTY→Klipper bridge process"
     while true; do
         if [ "$DEBUG" = true ]; then
             debug_log "Waiting for clipboard updates from tty-clipboard ($SERVER:$PORTS)..."
-            tty-cb-client -p "$PORTS" read_blocked "$SERVER" 2>&1 | while IFS= read -r line; do
-                echo "[$(date +'%Y-%m-%d %H:%M:%S')] Received from tty-clipboard: $line" >&2
-                echo "[$(date +'%Y-%m-%d %H:%M:%S')] Writing to Klipper clipboard..." >&2
-                $QDBUS org.kde.klipper /klipper org.kde.klipper.klipper.setClipboardContents "$line" 2>&1 | while read -r klipper_line; do
-                    echo "[$(date +'%Y-%m-%d %H:%M:%S')] setClipboardContents: $klipper_line" >&2
-                done
-                echo "[$(date +'%Y-%m-%d %H:%M:%S')] Written to Klipper clipboard" >&2
+            tty-cb-client -vv -p "$PORTS" read_blocked "$SERVER" 2>&1 | while IFS= read -r line; do
+                # Check if this is a debug line with metadata
+                if echo "$line" | grep -q "Data from host:"; then
+                    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $line" >&2
+                elif echo "$line" | grep -q "Received"; then
+                    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $line" >&2
+                else
+                    echo "[$(date +'%Y-%m-%d %H:%M:%S')] Received from tty-clipboard: $line" >&2
+                    echo "[$(date +'%Y-%m-%d %H:%M:%S')] Writing to Klipper clipboard..." >&2
+                    $QDBUS org.kde.klipper /klipper org.kde.klipper.klipper.setClipboardContents "$line" 2>&1 | while read -r klipper_line; do
+                        echo "[$(date +'%Y-%m-%d %H:%M:%S')] setClipboardContents: $klipper_line" >&2
+                    done
+                    echo "[$(date +'%Y-%m-%d %H:%M:%S')] Written to Klipper clipboard" >&2
+                fi
             done
         else
             tty-cb-client -p "$PORTS" read_blocked "$SERVER" 2>/dev/null | while IFS= read -r line; do

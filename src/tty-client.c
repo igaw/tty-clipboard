@@ -26,6 +26,7 @@
 #include <endian.h>
 #include <sys/select.h>
 #include <poll.h>
+#include <time.h>
 
 // mbedTLS context structures
 typedef struct {
@@ -599,6 +600,14 @@ static void do_write_multi(connection_t *conns, int count, uint64_t client_id, u
 		memcpy(out_uuid, write_uuid, UUID_SIZE);
 	}
 
+	// Get hostname and timestamp for debugging
+	char hostname[256];
+	if (gethostname(hostname, sizeof(hostname)) != 0) {
+		strncpy(hostname, "unknown", sizeof(hostname));
+	}
+	hostname[sizeof(hostname) - 1] = '\0';
+	int64_t timestamp = (int64_t)time(NULL);
+
 	int success_count = 0;
 	for (int i = 0; i < count; i++) {
 		Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
@@ -608,6 +617,8 @@ static void do_write_multi(connection_t *conns, int count, uint64_t client_id, u
 		wr.client_id = client_id;
 		wr.write_uuid.data = write_uuid;
 		wr.write_uuid.len = UUID_SIZE;
+		wr.hostname = hostname;
+		wr.timestamp = timestamp;
 		env.write = &wr;
 		env.body_case = TTYCB__ENVELOPE__BODY_WRITE;
 		
@@ -677,6 +688,11 @@ static void do_read_multi(connection_t *conns, int count)
 				LOG_INFO("Received data from port %d, size: %zu bytes, message_id: %lu",
 					 conns[i].port, resp->data->data.len,
 					 resp->data->message_id);
+				if (resp->data->hostname && resp->data->hostname[0] != '\0') {
+					LOG_DEBUG("Data from host: %s, timestamp: %ld",
+						  resp->data->hostname,
+						  (long)resp->data->timestamp);
+				}
 				fwrite(resp->data->data.data, 1,
 				       resp->data->data.len, stdout);
 				fflush(stdout);
@@ -750,6 +766,11 @@ static void do_subscribe_multi(connection_t *conns, int count, uint64_t client_i
 						  conns[i].port,
 						  resp->data->data.len,
 						  resp->data->message_id);
+					if (resp->data->hostname && resp->data->hostname[0] != '\0') {
+						LOG_DEBUG("Data from host: %s, timestamp: %ld",
+							  resp->data->hostname,
+							  (long)resp->data->timestamp);
+					}
 					fwrite(resp->data->data.data, 1,
 					       resp->data->data.len, stdout);
 					fflush(stdout);
