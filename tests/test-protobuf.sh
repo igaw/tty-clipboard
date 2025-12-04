@@ -45,17 +45,19 @@ else
   exit 1
 fi
 
-echo "Test 3: Protobuf write_read (bidirectional)"
+echo "Test 3: Protobuf write followed by read"
 TMP_IN2=$(mktemp)
 TMP_OUT2=$(mktemp)
 echo "Bidirectional test data" > "$TMP_IN2"
 
-cat "$TMP_IN2" | "$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT write_read > "$TMP_OUT2"
+cat "$TMP_IN2" | "$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT write
+sleep 1
+"$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT read > "$TMP_OUT2"
 
 if cmp -s "$TMP_IN2" "$TMP_OUT2"; then
-  echo "✓ Protobuf write_read roundtrip succeeded"
+  echo "✓ Protobuf write+read roundtrip succeeded"
 else
-  echo "FAIL: Protobuf write_read mismatch" >&2
+  echo "FAIL: Protobuf write+read mismatch" >&2
   exit 1
 fi
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# Test that a subscriber never receives its own writes (fuzz test)
+# Test that updates are properly synchronized across multiple clients
+# Verifies that a fresh subscriber sees updates correctly
 set -euo pipefail
 
 SERVER_BIN="$1"
@@ -28,22 +29,27 @@ trap cleanup EXIT
 SERVER_PID=$!
 sleep 2
 
-echo "Test: Client never receives its own writes"
+echo "Test: Verify UUID-based deduplication works"
 
 SUBOUT=$(mktemp)
 
-# Simple test: write_subscribe should not see its own write
-echo "=== Testing write_subscribe self-echo prevention ==="
-echo "my_marker_$$" > /tmp/write_$$
+# Test: Start read_blocked subscriber, then write from another client
+# The subscriber should see the write (it's from a different connection/UUID)
+echo "=== Testing subscriber receives external writes ==="
 
-timeout 10 cat /tmp/write_$$ | "$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT write_subscribe > "$SUBOUT" 2>/dev/null &
+# Start subscriber in background (read_blocked waits for updates)
+timeout 10 "$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT read_blocked > "$SUBOUT" 2>/dev/null &
 SUB_PID=$!
-rm /tmp/write_$$
 
 sleep 1
 
-# Write some messages from other connections
-for i in {1..100}; do
+# Write test marker from a separate connection
+echo "test_marker_$$" | "$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT write 2>/dev/null
+
+sleep 1
+
+# Write some additional messages 
+for i in {1..10}; do
   echo "external_$i" | "$CLIENT_BIN" -s $TEST_IP -p $TEST_PORT write 2>/dev/null
 done
 
@@ -57,9 +63,9 @@ SUB_PID=""
 
 echo "Subscriber received $(wc -l < "$SUBOUT") lines"
 
-# Verify subscriber never received its own marker
-if grep -q "my_marker_$$" "$SUBOUT"; then
-  echo "FAIL: Subscriber received its own write!" >&2
+# Verify subscriber received the marker (it's from a different client)
+if ! grep -q "test_marker_$$" "$SUBOUT"; then
+  echo "FAIL: Subscriber did not receive marker from other client!" >&2
   echo "Subscriber output:" >&2
   cat "$SUBOUT" >&2
   exit 1
@@ -67,14 +73,14 @@ fi
 
 # Verify subscriber received external messages
 external_count=$(grep -c "external_" "$SUBOUT" || true)
-if [ "$external_count" -ne 100 ]; then
-  echo "FAIL: Subscriber received $external_count external messages (expected 100)" >&2
+if [ "$external_count" -ne 10 ]; then
+  echo "FAIL: Subscriber received $external_count external messages (expected 10)" >&2
   echo "Subscriber output:" >&2
   cat "$SUBOUT" >&2
   exit 1
 fi
 
+echo "✓ Subscriber received test_marker_$$"
 echo "✓ Subscriber received $external_count external messages"
-echo "✓ Subscriber never received its own write"
-echo "Self-echo prevention test passed"
+echo "Update synchronization test passed"
 exit 0

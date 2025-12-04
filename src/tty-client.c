@@ -439,9 +439,7 @@ static void print_usage(const char *prog_name)
 	printf("\nCommands:\n");
 	printf("  read             Read clipboard content from server\n");
 	printf("  write            Write stdin content to server clipboard\n");
-	printf("  write_read       Write then read from clipboard\n");
 	printf("  read_blocked     Subscribe to clipboard updates (blocking)\n");
-	printf("  write_subscribe  Write then subscribe to updates\n");
 	printf("\nOptions:\n");
 	printf("  -h, --help       Display this help message\n");
 	printf("  -V, --version    Display version information\n");
@@ -585,190 +583,21 @@ static uint8_t *read_stdin_to_buffer(size_t *out_size)
 	return buf;
 }
 
-static void cleanup_and_exit(ssl_context_t *ssl_ctx, int sock, const char *error_msg)
-{
-	fprintf(stderr, "%s\n", error_msg);
-	mbedtls_ssl_close_notify(&ssl_ctx->ssl);
-	close(sock);
-	mbedtls_ssl_free(&ssl_ctx->ssl);
-	mbedtls_ssl_config_free(&ssl_ctx->conf);
-	mbedtls_x509_crt_free(&ssl_ctx->cacert);
-	mbedtls_x509_crt_free(&ssl_ctx->clicert);
-	mbedtls_pk_free(&ssl_ctx->pkey);
-	mbedtls_entropy_free(&ssl_ctx->entropy);
-	mbedtls_ctr_drbg_free(&ssl_ctx->ctr_drbg);
-	free(ssl_ctx);
-	exit(EXIT_FAILURE);
-}
 
-static void do_write(ssl_context_t *ssl_ctx, uint64_t client_id, int sock)
-{
-	size_t used;
-	LOG_DEBUG("Reading data from stdin for write operation");
-	uint8_t *buf = read_stdin_to_buffer(&used);
-	LOG_DEBUG("Read %zu bytes from stdin", used);
-
-	Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
-	Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT;
-	wr.data.data = buf;
-	wr.data.len = used;
-	wr.client_id = client_id;
-	env.write = &wr;
-	env.body_case = TTYCB__ENVELOPE__BODY_WRITE;
-	LOG_DEBUG("Sending write request to server");
-	pb_send_envelope(ssl_ctx, &env);
-	free(buf);
-
-	LOG_DEBUG("Waiting for write response");
-	Ttycb__Envelope *resp = pb_recv_envelope(ssl_ctx);
-	if (!resp || resp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP ||
-	    !resp->write_resp || !resp->write_resp->ok) {
-		ttycb__envelope__free_unpacked(resp, NULL);
-		cleanup_and_exit(ssl_ctx, sock, "Write failed");
-	}
-	LOG_INFO("Write operation completed, message_id: %lu", resp->write_resp->message_id);
-	ttycb__envelope__free_unpacked(resp, NULL);
-}
-
-static void do_read(ssl_context_t *ssl_ctx, int sock)
-{
-	LOG_DEBUG("Sending read request to server");
-	Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
-	Ttycb__ReadRequest rd = TTYCB__READ_REQUEST__INIT;
-	env.read = &rd;
-	env.body_case = TTYCB__ENVELOPE__BODY_READ;
-	pb_send_envelope(ssl_ctx, &env);
-
-	LOG_DEBUG("Waiting for data frame response");
-	Ttycb__Envelope *resp = pb_recv_envelope(ssl_ctx);
-	if (!resp || resp->body_case != TTYCB__ENVELOPE__BODY_DATA ||
-	    !resp->data) {
-		ttycb__envelope__free_unpacked(resp, NULL);
-		cleanup_and_exit(ssl_ctx, sock, "Read failed");
-	}
-	LOG_INFO("Received data frame, size: %zu bytes, message_id: %lu",
-		 resp->data->data.len, resp->data->message_id);
-	fwrite(resp->data->data.data, 1, resp->data->data.len, stdout);
-	fflush(stdout);
-	ttycb__envelope__free_unpacked(resp, NULL);
-}
-
-static void do_write_read(ssl_context_t *ssl_ctx, uint64_t client_id, int sock)
-{
-	LOG_DEBUG("Starting write_read operation");
-	size_t used;
-	uint8_t *buf = read_stdin_to_buffer(&used);
-	LOG_DEBUG("Read %zu bytes from stdin for write_read", used);
-
-	Ttycb__Envelope envw = TTYCB__ENVELOPE__INIT;
-	Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT;
-	wr.data.data = buf;
-	wr.data.len = used;
-	wr.client_id = client_id;
-	envw.write = &wr;
-	envw.body_case = TTYCB__ENVELOPE__BODY_WRITE;
-	LOG_DEBUG("Sending write request");
-	pb_send_envelope(ssl_ctx, &envw);
-
-	LOG_DEBUG("Waiting for write response");
-	Ttycb__Envelope *wresp = pb_recv_envelope(ssl_ctx);
-	if (!wresp || wresp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP ||
-	    !wresp->write_resp || !wresp->write_resp->ok) {
-		ttycb__envelope__free_unpacked(wresp, NULL);
-		cleanup_and_exit(ssl_ctx, sock, "Write failed");
-	}
-	LOG_INFO("Write completed, message_id: %lu", wresp->write_resp->message_id);
-	ttycb__envelope__free_unpacked(wresp, NULL);
-	free(buf);
-
-	LOG_DEBUG("Sending read request");
-	Ttycb__Envelope envr = TTYCB__ENVELOPE__INIT;
-	Ttycb__ReadRequest rd = TTYCB__READ_REQUEST__INIT;
-	envr.read = &rd;
-	envr.body_case = TTYCB__ENVELOPE__BODY_READ;
-	pb_send_envelope(ssl_ctx, &envr);
-
-	LOG_DEBUG("Waiting for data frame");
-	Ttycb__Envelope *rresp = pb_recv_envelope(ssl_ctx);
-	if (!rresp || rresp->body_case != TTYCB__ENVELOPE__BODY_DATA ||
-	    !rresp->data) {
-		ttycb__envelope__free_unpacked(rresp, NULL);
-		cleanup_and_exit(ssl_ctx, sock, "Read failed");
-	}
-	fwrite(rresp->data->data.data, 1, rresp->data->data.len, stdout);
-	fflush(stdout);
-	ttycb__envelope__free_unpacked(rresp, NULL);
-}
-
-static void do_subscribe(ssl_context_t *ssl_ctx, uint64_t client_id)
-{
-	LOG_INFO("Starting subscription to clipboard updates");
-	Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
-	Ttycb__SubscribeRequest sub = TTYCB__SUBSCRIBE_REQUEST__INIT;
-	sub.client_id = client_id;
-	env.subscribe = &sub;
-	env.body_case = TTYCB__ENVELOPE__BODY_SUBSCRIBE;
-	LOG_DEBUG("Sending subscribe request");
-	pb_send_envelope(ssl_ctx, &env);
-
-	LOG_DEBUG("Entering subscription loop");
-	// Loop receiving data frames until connection closes or terminate signal
-	while (!terminate) {
-		Ttycb__Envelope *resp = pb_recv_envelope(ssl_ctx);
-		if (!resp) {
-			LOG_DEBUG("Connection closed by server");
-			break; // connection closed
-		}
-		if (resp->body_case == TTYCB__ENVELOPE__BODY_DATA &&
-		    resp->data) {
-			LOG_DEBUG("Received clipboard update, size: %zu bytes, message_id: %lu",
-				  resp->data->data.len, resp->data->message_id);
-			fwrite(resp->data->data.data, 1,
-			       resp->data->data.len, stdout);
-			fflush(stdout);
-		}
-		ttycb__envelope__free_unpacked(resp, NULL);
-	}
-	LOG_INFO("Subscription ended");
-}
-
-static void do_write_subscribe(ssl_context_t *ssl_ctx, uint64_t client_id,
-				int sock)
-{
-	LOG_DEBUG("Starting write_subscribe operation");
-	size_t used;
-	uint8_t *buf = read_stdin_to_buffer(&used);
-	LOG_DEBUG("Read %zu bytes from stdin for write_subscribe", used);
-
-	Ttycb__Envelope envw = TTYCB__ENVELOPE__INIT;
-	Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT;
-	wr.data.data = buf;
-	wr.data.len = used;
-	wr.client_id = client_id;
-	envw.write = &wr;
-	envw.body_case = TTYCB__ENVELOPE__BODY_WRITE;
-	pb_send_envelope(ssl_ctx, &envw);
-
-	Ttycb__Envelope *wresp = pb_recv_envelope(ssl_ctx);
-	if (!wresp || wresp->body_case != TTYCB__ENVELOPE__BODY_WRITE_RESP ||
-	    !wresp->write_resp || !wresp->write_resp->ok) {
-		ttycb__envelope__free_unpacked(wresp, NULL);
-		cleanup_and_exit(ssl_ctx, sock, "Write failed");
-	}
-	ttycb__envelope__free_unpacked(wresp, NULL);
-	free(buf);
-
-	// Now subscribe
-	do_subscribe(ssl_ctx, client_id);
-}
-
-// Multi-port operations
-static void do_write_multi(connection_t *conns, int count, uint64_t client_id)
+// Multi-port operations (work for both single and multi-port cases)
+static void do_write_multi(connection_t *conns, int count, uint64_t client_id, unsigned char *out_uuid)
 {
 	size_t used;
 	LOG_DEBUG("Reading data from stdin for multi-port write operation");
 	uint8_t *buf = read_stdin_to_buffer(&used);
 	LOG_DEBUG("Read %zu bytes from stdin, writing to %d port(s)", used, count);
+
+	// Generate UUID once for all ports (same write operation)
+	unsigned char write_uuid[UUID_SIZE];
+	generate_uuid(write_uuid);
+	if (out_uuid) {
+		memcpy(out_uuid, write_uuid, UUID_SIZE);
+	}
 
 	int success_count = 0;
 	for (int i = 0; i < count; i++) {
@@ -777,6 +606,8 @@ static void do_write_multi(connection_t *conns, int count, uint64_t client_id)
 		wr.data.data = buf;
 		wr.data.len = used;
 		wr.client_id = client_id;
+		wr.write_uuid.data = write_uuid;
+		wr.write_uuid.len = UUID_SIZE;
 		env.write = &wr;
 		env.body_case = TTYCB__ENVELOPE__BODY_WRITE;
 		
@@ -798,6 +629,11 @@ static void do_write_multi(connection_t *conns, int count, uint64_t client_id)
 	
 	free(buf);
 	LOG_INFO("Write operation completed for %d/%d port(s)", success_count, count);
+	
+	// If any writes failed, exit with error
+	if (success_count != count) {
+		exit(EXIT_FAILURE);
+	}
 }
 
 static void do_read_multi(connection_t *conns, int count)
@@ -854,9 +690,10 @@ static void do_read_multi(connection_t *conns, int count)
 	
 	free(fds);
 	LOG_ERROR("No valid data received from any port");
+	exit(EXIT_FAILURE);
 }
 
-static void do_subscribe_multi(connection_t *conns, int count, uint64_t client_id)
+static void do_subscribe_multi(connection_t *conns, int count, uint64_t client_id, const unsigned char *init_uuid)
 {
 	LOG_INFO("Starting subscription to %d port(s)", count);
 	
@@ -924,6 +761,7 @@ static void do_subscribe_multi(connection_t *conns, int count, uint64_t client_i
 	
 	free(fds);
 	LOG_INFO("Multi-port subscription ended");
+	(void)init_uuid; // Unused parameter
 }
 
 int main(int argc, char *argv[])
@@ -989,11 +827,9 @@ int main(int argc, char *argv[])
 
 	// Validate role
 	if (strcmp(role, "read") != 0 && strcmp(role, "write") != 0 &&
-	    strcmp(role, "write_read") != 0 &&
-	    strcmp(role, "read_blocked") != 0 &&
-	    strcmp(role, "write_subscribe") != 0) {
+	    strcmp(role, "read_blocked") != 0) {
 		fprintf(stderr,
-			"Error: Command must be 'read', 'write', 'write_read', 'read_blocked', or 'write_subscribe'\n\n");
+			"Error: Command must be 'read', 'write', or 'read_blocked'\n\n");
 		print_usage(argv[0]);
 		exit(EXIT_FAILURE);
 	}
@@ -1033,41 +869,16 @@ int main(int argc, char *argv[])
 	uint64_t client_id = generate_client_id(conns[0].ssl_ctx);
 	LOG_DEBUG("Generated client_id: %lu", client_id);
 
-	// Execute the requested role
+	// Execute the requested role using multi-port functions
+	// (they handle both single and multiple ports efficiently)
 	LOG_INFO("Executing command: %s", role);
 	
-	if (port_count == 1) {
-		// Single port mode - use existing functions
-		if (strcmp(role, "write") == 0) {
-			do_write(conns[0].ssl_ctx, client_id, conns[0].sock_fd);
-		} else if (strcmp(role, "read") == 0) {
-			do_read(conns[0].ssl_ctx, conns[0].sock_fd);
-		} else if (strcmp(role, "write_read") == 0) {
-			do_write_read(conns[0].ssl_ctx, client_id,
-				      conns[0].sock_fd);
-		} else if (strcmp(role, "read_blocked") == 0) {
-			do_subscribe(conns[0].ssl_ctx, client_id);
-		} else if (strcmp(role, "write_subscribe") == 0) {
-			do_write_subscribe(conns[0].ssl_ctx, client_id,
-					   conns[0].sock_fd);
-		}
-	} else {
-		// Multi-port mode
-		if (strcmp(role, "write") == 0 ||
-		    strcmp(role, "write_read") == 0 ||
-		    strcmp(role, "write_subscribe") == 0) {
-			do_write_multi(conns, port_count, client_id);
-		}
-		
-		if (strcmp(role, "read") == 0 ||
-		    strcmp(role, "write_read") == 0) {
-			do_read_multi(conns, port_count);
-		}
-		
-		if (strcmp(role, "read_blocked") == 0 ||
-		    strcmp(role, "write_subscribe") == 0) {
-			do_subscribe_multi(conns, port_count, client_id);
-		}
+	if (strcmp(role, "write") == 0) {
+		do_write_multi(conns, port_count, client_id, NULL);
+	} else if (strcmp(role, "read") == 0) {
+		do_read_multi(conns, port_count);
+	} else if (strcmp(role, "read_blocked") == 0) {
+		do_subscribe_multi(conns, port_count, client_id, NULL);
 	}
 	
 	LOG_INFO("Command completed successfully");

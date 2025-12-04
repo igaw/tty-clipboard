@@ -90,6 +90,7 @@ char *shared_buffer = NULL;
 size_t shared_capacity = 0; // allocated size
 size_t shared_length = 0; // used length
 uint64_t shared_message_id = 0; // message_id of current buffer
+unsigned char shared_write_uuid[UUID_SIZE]; // UUID of the current write
 unsigned int gen = 0;
 pthread_mutex_t buffer_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t buffer_cond = PTHREAD_COND_INITIALIZER;
@@ -317,12 +318,14 @@ static int handle_write_request(mbedtls_ssl_context *ssl, Ttycb__WriteRequest *w
 		if (!ok)
 			wr.message = (char *)"oversize";
 		wr.message_id = 0; // No message_id for rejected writes
+		wr.write_uuid.data = NULL;
+		wr.write_uuid.len = 0;
 		resp.write_resp = &wr;
 		resp.body_case = TTYCB__ENVELOPE__BODY_WRITE_RESP;
 		return send_protobuf_response(ssl, &resp);
 	}
 
-	// Store the data
+	// Store the data and track the write UUID
 	pthread_mutex_lock(&buffer_mutex);
 	if (len > shared_capacity) {
 		char *nbuf = realloc(shared_buffer, len);
@@ -337,17 +340,27 @@ static int handle_write_request(mbedtls_ssl_context *ssl, Ttycb__WriteRequest *w
 	shared_length = len;
 	uint64_t msg_id = next_message_id++;
 	shared_message_id = msg_id;
+	
+	// Store the UUID of this write operation for deduplication
+	if (write_req->write_uuid.len == UUID_SIZE) {
+		memcpy(shared_write_uuid, write_req->write_uuid.data, UUID_SIZE);
+	} else {
+		memset(shared_write_uuid, 0, UUID_SIZE);
+	}
+	
 	gen++;
 	pthread_cond_broadcast(&buffer_cond);
 	pthread_mutex_unlock(&buffer_mutex);
 
 	LOG_INFO("Write completed: %zu bytes, message_id: %lu", len, msg_id);
 
-	// Send success response
+	// Send success response with UUID echo
 	Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
 	Ttycb__WriteResponse wr = TTYCB__WRITE_RESPONSE__INIT;
 	wr.ok = 1;
 	wr.message_id = msg_id;
+	wr.write_uuid.data = (uint8_t *)write_req->write_uuid.data;
+	wr.write_uuid.len = write_req->write_uuid.len;
 	resp.write_resp = &wr;
 	resp.body_case = TTYCB__ENVELOPE__BODY_WRITE_RESP;
 	return send_protobuf_response(ssl, &resp);
@@ -392,6 +405,8 @@ static int handle_subscribe_request(mbedtls_ssl_context *ssl, Ttycb__SubscribeRe
 	pthread_mutex_lock(&buffer_mutex);
 	unsigned int seen = gen; // Start from current generation
 	uint64_t last_sent_message_id = shared_message_id;
+	unsigned char last_sent_uuid[UUID_SIZE];
+	memset(last_sent_uuid, 0, UUID_SIZE);
 	pthread_mutex_unlock(&buffer_mutex);
 
 	while (!terminate) {
@@ -412,13 +427,18 @@ static int handle_subscribe_request(mbedtls_ssl_context *ssl, Ttycb__SubscribeRe
 
 		size_t len = shared_length;
 		uint64_t msg_id = shared_message_id;
+		unsigned char uuid_to_send[UUID_SIZE];
+		memcpy(uuid_to_send, shared_write_uuid, UUID_SIZE);
 		last_sent_message_id = msg_id;
+		memcpy(last_sent_uuid, uuid_to_send, UUID_SIZE);
 
 		Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
 		Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
 		df.data.len = len;
 		df.data.data = (uint8_t *)shared_buffer;
 		df.message_id = msg_id;
+		df.write_uuid.data = uuid_to_send;
+		df.write_uuid.len = UUID_SIZE;
 		resp.data = &df;
 		resp.body_case = TTYCB__ENVELOPE__BODY_DATA;
 

@@ -4,6 +4,7 @@ package ttycb;
 message WriteRequest {
   bytes data = 1;
   uint64 client_id = 2;
+  bytes write_uuid = 3;  // UUID to track write operations and detect duplicates
 }
 
 message ReadRequest {}
@@ -16,11 +17,13 @@ message WriteResponse {
   bool ok = 1;
   string message = 2;
   uint64 message_id = 3;
+  bytes write_uuid = 4;  // Echo back the UUID for confirmation
 }
 
 message DataFrame {
   bytes data = 1;
   uint64 message_id = 2;
+  bytes write_uuid = 3;  // UUID of the write that created this data
 }
 
 message Error {

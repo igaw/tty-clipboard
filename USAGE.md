@@ -3,25 +3,27 @@
 ## tty-cb-client
 
 ```bash
-Usage: tty-cb-client [OPTIONS] <read|write[|write_read]> <server_ip>
+Usage: tty-cb-client [OPTIONS] <command>
 
 A secure clipboard client for TTY environments.
 
 Commands:
   read             Read clipboard content from server
   write            Write stdin content to server clipboard
+  read_blocked     Subscribe to clipboard updates (blocking)
 
 Options:
-  -s, --sync       Use synchronous/blocking read mode
   -h, --help       Display this help message
-  -v, --version    Display version information
-  --protobuf       Use protobuf-c bidirectional protocol (enables write_read)
+  -V, --version    Display version information
+  -v, --verbose    Enable verbose logging (repeat for more detail)
+  -s, --server IP  Server IP address (default: 127.0.0.1)
+  -p, --port PORTS Server port(s), comma-separated (default: 5457)
 
 Examples:
   tty-cb-client write 192.168.1.100          # Write stdin to clipboard
   tty-cb-client read 192.168.1.100           # Read clipboard to stdout
-  tty-cb-client read 192.168.1.100 --sync    # Read with sync mode
-  tty-cb-client --protobuf write_read 192.168.1.100 < data.bin  # Write then read back over one connection
+  tty-cb-client read_blocked 192.168.1.100   # Monitor clipboard for updates
+  tty-cb-client -p 5457,5458 write 192.168.1.100  # Write to multiple ports
 ```
 
 ## tty-cb-server
@@ -33,34 +35,28 @@ A secure clipboard server for TTY environments.
 
 Options:
   -h, --help                     Display this help message
-  -v, --version                  Display version information
-  -d, --daemon                   Run in daemon mode (background)
+  -V, --version                  Display version information
+  -v, --verbose                  Enable verbose logging
+  -b, --bind IP                  Bind to specific IP address (default: 127.0.0.1)
+  -p, --port PORT                Listen on port (default: 5457)
   -m, --max-size N[K|M|G]        Set maximum clipboard size (0=unlimited)
-  -p, --oversize-policy MODE     Action when write exceeds max-size:
+  -R, --oversize-policy MODE     Action when write exceeds max-size:
                                  reject (close connection, client fails)
                                  drop   (discard payload, client succeeds)
-  --protobuf                     Enable protobuf-c bidirectional protocol mode
 
 Port:
-  5457                          Single port for all operations
+  5457 (default)                Single port for all operations
 
-Protocol:
-  Client connects, sends one command string (read, write, read_blocked) then
-  transmits or receives an 8-byte big-endian length prefix + raw payload.
+Client Roles:
+  - write: Write stdin to clipboard, exit
+  - read: Read clipboard to stdout once, exit
+  - read_blocked: Subscribe to clipboard updates (blocking)
 
-Oversize Handling:
-  max-size limits stored clipboard expansion. If exceeded:
-    reject: server issues TLS shutdown early; client write fails.
-    drop: server streams/discards payload without storing; clipboard unchanged.
+Authentication:
+  Client authentication is required via mutual TLS.
 
-Write Acknowledgement:
-  After a write payload is sent, server returns 1 status byte:
-    0 = success, clipboard updated
-    1 = failure (oversize rejection or internal error)
-  Clients exit non-zero on failure.
-
-The server listens on all interfaces (0.0.0.0) by default.
-Client authentication is required via mutual TLS.
+The server listens on the specified address and port, supports multiple concurrent clients,
+and maintains clipboard state with optional size limits.
 ```
 
 ## Quick Start
