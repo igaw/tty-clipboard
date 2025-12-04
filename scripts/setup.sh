@@ -387,6 +387,7 @@ ExecStop=%h/.local/bin/wayland-bridge.sh --stop
 Restart=on-failure
 RestartSec=5
 Environment="WAYLAND_DISPLAY=wayland-0"
+Environment="HOME=%h"
 
 [Install]
 WantedBy=default.target

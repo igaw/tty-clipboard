@@ -79,7 +79,18 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Ensure ~/.local/bin is in PATH (needed when run from systemd)
+# systemd may not set HOME, so we need to handle that
+if [ -z "${HOME:-}" ]; then
+    HOME=$(getent passwd "$(whoami)" | cut -d: -f6)
+    export HOME
+fi
 export PATH="${HOME}/.local/bin:${PATH}"
+
+# Also try adding to PATH using direct expansion in case HOME isn't fully resolved
+LOCAL_BIN_DIR="${HOME}/.local/bin"
+if [ -d "$LOCAL_BIN_DIR" ]; then
+    export PATH="$LOCAL_BIN_DIR:${PATH}"
+fi
 
 # Check dependencies
 if ! command -v wl-copy &> /dev/null; then
@@ -93,8 +104,16 @@ if ! command -v wl-paste &> /dev/null; then
 fi
 
 if ! command -v tty-cb-client &> /dev/null; then
-    echo "Error: tty-cb-client not found. Please install tty-clipboard."
-    exit 1
+    # If still not found, try using absolute path
+    if [ ! -f "$LOCAL_BIN_DIR/tty-cb-client" ]; then
+        echo "Error: tty-cb-client not found at $LOCAL_BIN_DIR/tty-cb-client. Please install tty-clipboard."
+        exit 1
+    fi
+    # Create an alias to use the absolute path
+    tty-cb-client() {
+        "$LOCAL_BIN_DIR/tty-cb-client" "$@"
+    }
+    export -f tty-cb-client
 fi
 
 # PID file locations
@@ -183,7 +202,38 @@ if [ "$VERBOSE" = true ]; then
 fi
 
 # Cleanup handler
-trap 'stop_bridge; exit 0' INT TERM
+trap 'stop_bridge; exit 0' INT TERM EXIT
 
 # Keep script running and wait for child processes
-wait
+# If either process dies, restart it
+while true; do
+    # Check if Wayland→TTY process is still running
+    if ! kill -0 $WAYLAND_TO_TTY_PID 2>/dev/null; then
+        echo "Wayland→TTY bridge died, restarting..."
+        (
+            while true; do
+                wl-paste -w tty-cb-client -p "$PORTS" write "$SERVER" 2>/dev/null || sleep 1
+            done
+        ) &
+        WAYLAND_TO_TTY_PID=$!
+        echo $WAYLAND_TO_TTY_PID > "$PIDFILE_WAYLAND_TO_TTY"
+    fi
+    
+    # Check if TTY→Wayland process is still running
+    if ! kill -0 $TTY_TO_WAYLAND_PID 2>/dev/null; then
+        echo "TTY→Wayland bridge died, restarting..."
+        (
+            while true; do
+                tty-cb-client -p "$PORTS" read_blocked "$SERVER" 2>/dev/null | while IFS= read -r line; do
+                    echo "$line" | wl-copy 2>/dev/null
+                done
+                sleep 1
+            done
+        ) &
+        TTY_TO_WAYLAND_PID=$!
+        echo $TTY_TO_WAYLAND_PID > "$PIDFILE_TTY_TO_WAYLAND"
+    fi
+    
+    # Sleep a bit before checking again
+    sleep 2
+done
