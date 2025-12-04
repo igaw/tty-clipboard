@@ -1,0 +1,93 @@
+name: Meson Build
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        build-type: [debug, release]
+        static: [false, true]
+        exclude:
+          # Reduce matrix size - test static builds only on release
+          - build-type: debug
+            static: true
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    
+    - name: Install dependencies (Ubuntu)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libmbedtls-dev \
+          libprotobuf-c-dev \
+          meson \
+          ninja-build \
+          cmake \
+          autoconf \
+          automake \
+          libtool
+    
+    - name: Setup Meson Build
+      run: |
+        meson setup builddir \
+          -Dbuildtype=${{ matrix.build-type }} \
+          -Dstatic=${{ matrix.static }}
+    
+    - name: Build with Meson
+      run: |
+        meson compile -C builddir
+    
+    - name: Run Tests
+      run: |
+        meson test -C builddir -v
+      continue-on-error: true
+    
+    - name: Install
+      run: |
+        meson install -C builddir --destdir /tmp/install
+
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        build-type: [debug, release]
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    
+    - name: Install dependencies (macOS)
+      run: |
+        brew install mbedtls protobuf-c meson ninja cmake autoconf automake libtool
+    
+    - name: Setup Meson Build
+      run: |
+        meson setup builddir \
+          -Dbuildtype=${{ matrix.build-type }} \
+          -Dstatic=false
+    
+    - name: Build with Meson
+      run: |
+        meson compile -C builddir
+    
+    - name: Run Tests
+      run: |
+        meson test -C builddir -v
+      continue-on-error: true
+    
+    - name: Install
+      run: |
+        meson install -C builddir --destdir /tmp/install
