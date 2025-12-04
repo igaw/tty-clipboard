@@ -47,10 +47,11 @@ endif
 
 # Protobuf-C
 protoc_depends = []
+protoc_c_prog = find_program('protoc-c', required: false)
+
 if get_option('static')
   message('Static build: prefer static libprotobuf-c, fallback to subproject')
   protobuf_dep = dependency('libprotobuf-c', required: false, static: true)
-  protoc_c = find_program('protoc-c', required: false)
 
   if not protobuf_dep.found()
     message('System static libprotobuf-c not found, using subproject')
@@ -61,14 +62,13 @@ if get_option('static')
     protobuf_dep = pb_sub.get_variable('protobuf_c_dep')
     protoc_depends = [pb_sub.get_variable('protobufc_build')]
     protobuf_inc = pb_sub.get_variable('protobuf_c_inc')
-  endif
-  
-  if not protoc_c.found()
-    error('protoc-c is required but not found. Please install libprotobuf-c-dev or protobuf-c-compiler.')
+    # Use protoc_c from subproject if system one not found
+    if not protoc_c_prog.found()
+      protoc_c_prog = pb_sub.get_variable('protoc_c')
+    endif
   endif
 else
   protobuf_dep = dependency('libprotobuf-c', required: false)
-  protoc_c = find_program('protoc-c', required: false)
 
   if not protobuf_dep.found()
     message('System libprotobuf-c not found, using subproject')
@@ -79,11 +79,15 @@ else
     protobuf_dep = pb_sub.get_variable('protobuf_c_dep')
     protoc_depends = [pb_sub.get_variable('protobufc_build')]
     protobuf_inc = pb_sub.get_variable('protobuf_c_inc')
+    # Use protoc_c from subproject if system one not found
+    if not protoc_c_prog.found()
+      protoc_c_prog = pb_sub.get_variable('protoc_c')
+    endif
   endif
-  
-  if not protoc_c.found()
-    error('protoc-c is required but not found. Please install libprotobuf-c-dev or protobuf-c-compiler.')
-  endif
+endif
+
+if not protoc_c_prog.found()
+  error('protoc-c is required but not found. Please install libprotobuf-c-dev or protobuf-c-compiler.')
 endif
 
 if not is_variable('protobuf_inc')

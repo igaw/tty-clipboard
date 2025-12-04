@@ -22,12 +22,12 @@ config_h = configure_file(
   configuration: config_conf
 )
 
-# Generate protobuf code
+# Generate protobuf code using protoc (modern method, avoids deprecated protoc-c wrapper)
 proto_file = files('../proto/clipboard.proto')
 pb = custom_target('gen-proto',
   input: proto_file,
   output: ['clipboard.pb-c.c', 'clipboard.pb-c.h'],
-  command: [protoc_c, '--c_out=@OUTDIR@', '--proto_path=@SOURCE_ROOT@/proto', 'clipboard.proto'],
+  command: [protoc_c_prog, '--c_out=@OUTDIR@', '--proto_path=@SOURCE_ROOT@/proto', 'clipboard.proto'],
   depends: protoc_depends,
 )
 
