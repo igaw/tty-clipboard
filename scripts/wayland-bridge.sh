@@ -78,6 +78,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Ensure ~/.local/bin is in PATH (needed when run from systemd)
+export PATH="${HOME}/.local/bin:${PATH}"
+
 # Check dependencies
 if ! command -v wl-copy &> /dev/null; then
     echo "Error: wl-copy not found. Please install wl-clipboard."

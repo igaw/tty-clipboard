@@ -126,6 +126,56 @@ fi
 
 echo "Using local certificates from: $LOCAL_CFG_BASE"
 
+# Function to check if ~/.local/bin is in PATH
+check_local_bin_in_path() {
+    if [[ ":$PATH:" == *":$HOME/.local/bin:"* ]]; then
+        return 0  # Found in PATH
+    else
+        return 1  # Not in PATH
+    fi
+}
+
+# Function to print PATH setup instructions
+print_path_setup_instructions() {
+    echo ""
+    echo "=========================================="
+    echo "⚠ Warning: ~/.local/bin is not in your PATH"
+    echo "=========================================="
+    echo ""
+    echo "To use tty-cb-client directly, add ~/.local/bin to your PATH."
+    echo ""
+    
+    # Detect shell
+    CURRENT_SHELL=$(basename "$SHELL")
+    
+    if [[ "$CURRENT_SHELL" == "bash" ]]; then
+        echo "For Bash, add this line to ~/.bashrc:"
+        echo ""
+        echo '    export PATH="$HOME/.local/bin:$PATH"'
+        echo ""
+        echo "Then reload with:"
+        echo "    source ~/.bashrc"
+        echo ""
+    elif [[ "$CURRENT_SHELL" == "zsh" ]]; then
+        echo "For Zsh, add this line to ~/.zshrc:"
+        echo ""
+        echo '    export PATH="$HOME/.local/bin:$PATH"'
+        echo ""
+        echo "Then reload with:"
+        echo "    source ~/.zshrc"
+        echo ""
+    else
+        echo "For other shells, add this line to your shell configuration file:"
+        echo ""
+        echo '    export PATH="$HOME/.local/bin:$PATH"'
+        echo ""
+    fi
+    
+    echo "Or use the full path for now:"
+    echo "    ~/.local/bin/tty-cb-client"
+    echo ""
+}
+
 # Install client locally
 echo ""
 echo "Installing client locally..."
@@ -133,6 +183,11 @@ mkdir -p "$HOME/.local/bin"
 cp "$CLIENT_BIN" "$HOME/.local/bin/tty-cb-client"
 chmod 755 "$HOME/.local/bin/tty-cb-client"
 echo "✓ Client installed to ~/.local/bin/tty-cb-client"
+
+# Check if ~/.local/bin is in PATH
+if ! check_local_bin_in_path; then
+    print_path_setup_instructions
+fi
 
 # Remote paths (will be expanded on remote host)
 REMOTE_BIN_DIR="\$HOME/.local/bin"
