@@ -202,38 +202,8 @@ if [ "$VERBOSE" = true ]; then
 fi
 
 # Cleanup handler
-trap 'stop_bridge; exit 0' INT TERM EXIT
+trap 'kill $WAYLAND_TO_TTY_PID $TTY_TO_WAYLAND_PID 2>/dev/null; exit 0' INT TERM EXIT
 
-# Keep script running and wait for child processes
-# If either process dies, restart it
-while true; do
-    # Check if Wayland→TTY process is still running
-    if ! kill -0 $WAYLAND_TO_TTY_PID 2>/dev/null; then
-        echo "Wayland→TTY bridge died, restarting..."
-        (
-            while true; do
-                wl-paste -w tty-cb-client -p "$PORTS" write "$SERVER" 2>/dev/null || sleep 1
-            done
-        ) &
-        WAYLAND_TO_TTY_PID=$!
-        echo $WAYLAND_TO_TTY_PID > "$PIDFILE_WAYLAND_TO_TTY"
-    fi
-    
-    # Check if TTY→Wayland process is still running
-    if ! kill -0 $TTY_TO_WAYLAND_PID 2>/dev/null; then
-        echo "TTY→Wayland bridge died, restarting..."
-        (
-            while true; do
-                tty-cb-client -p "$PORTS" read_blocked "$SERVER" 2>/dev/null | while IFS= read -r line; do
-                    echo "$line" | wl-copy 2>/dev/null
-                done
-                sleep 1
-            done
-        ) &
-        TTY_TO_WAYLAND_PID=$!
-        echo $TTY_TO_WAYLAND_PID > "$PIDFILE_TTY_TO_WAYLAND"
-    fi
-    
-    # Sleep a bit before checking again
-    sleep 2
-done
+# Keep the main script running by waiting for the child processes
+# If either exits, the main script will also exit (and systemd will restart it)
+wait $WAYLAND_TO_TTY_PID $TTY_TO_WAYLAND_PID
