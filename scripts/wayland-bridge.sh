@@ -155,8 +155,8 @@ if [ "$STOP" = true ]; then
     exit 0
 fi
 
-# Stop any existing bridge processes
-stop_bridge
+# Clean up stale PID files (don't try to stop processes, they may be from previous runs)
+rm -f "$PIDFILE_WAYLAND_TO_TTY" "$PIDFILE_TTY_TO_WAYLAND"
 
 # Wayland → TTY: Watch Wayland clipboard and write to tty-clipboard
 if [ "$VERBOSE" = true ]; then
