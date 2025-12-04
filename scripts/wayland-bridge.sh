@@ -275,25 +275,35 @@ fi
 debug_log "Bridge initialization complete"
 debug_log "Waiting for clipboard events..."
 
-# Cleanup handler - kill process group to ensure all subprocesses are terminated
+# Cleanup handler - kill all child processes
 cleanup() {
     debug_log "Shutting down bridge..."
-    # Kill child processes and their subprocesses
+    # Kill child processes and all their descendants
     if [ -n "${WAYLAND_TO_TTY_PID:-}" ]; then
-        kill -TERM -$WAYLAND_TO_TTY_PID 2>/dev/null || true
+        # Kill the main process
+        kill -TERM "$WAYLAND_TO_TTY_PID" 2>/dev/null || true
+        # Kill all descendants using pkill
+        pkill -TERM -P "$WAYLAND_TO_TTY_PID" 2>/dev/null || true
     fi
     if [ -n "${TTY_TO_WAYLAND_PID:-}" ]; then
-        kill -TERM -$TTY_TO_WAYLAND_PID 2>/dev/null || true
+        # Kill the main process
+        kill -TERM "$TTY_TO_WAYLAND_PID" 2>/dev/null || true
+        # Kill all descendants using pkill
+        pkill -TERM -P "$TTY_TO_WAYLAND_PID" 2>/dev/null || true
     fi
     # Give them a moment to terminate gracefully
-    sleep 0.2
+    sleep 0.3
     # Force kill if still running
     if [ -n "${WAYLAND_TO_TTY_PID:-}" ]; then
-        kill -KILL -$WAYLAND_TO_TTY_PID 2>/dev/null || true
+        kill -KILL "$WAYLAND_TO_TTY_PID" 2>/dev/null || true
+        pkill -KILL -P "$WAYLAND_TO_TTY_PID" 2>/dev/null || true
     fi
     if [ -n "${TTY_TO_WAYLAND_PID:-}" ]; then
-        kill -KILL -$TTY_TO_WAYLAND_PID 2>/dev/null || true
+        kill -KILL "$TTY_TO_WAYLAND_PID" 2>/dev/null || true
+        pkill -KILL -P "$TTY_TO_WAYLAND_PID" 2>/dev/null || true
     fi
+    # Clean up PID files
+    rm -f "$PIDFILE_WAYLAND_TO_TTY" "$PIDFILE_TTY_TO_WAYLAND" 2>/dev/null || true
     debug_log "Bridge stopped"
     exit 0
 }
