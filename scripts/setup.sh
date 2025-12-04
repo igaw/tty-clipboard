@@ -464,7 +464,7 @@ if [ "$INSTALL_WAYLAND_BRIDGE" = true ] && [ "$BRIDGE_TYPE" = "wayland" ]; then
         ALL_PORTS="$LOCAL_PORT"
     fi
 
-    cat > "$HOME/.config/systemd/user/tty-clipboard-bridge.service" << BRIDGEEOF
+    cat > "$HOME/.config/systemd/user/tty-cb-bridge.service" << BRIDGEEOF
 [Unit]
 Description=Wayland Clipboard Bridge for tty-clipboard
 Documentation=https://github.com/igaw/tty-clipboard
@@ -488,35 +488,35 @@ BRIDGEEOF
         echo "✓ Wayland bridge configured for ports: ${ALL_PORTS}"
     fi
     
-    echo "✓ Systemd service created: tty-clipboard-bridge.service"
+    echo "✓ Systemd service created: tty-cb-bridge.service"
     
     # Enable and start the service
     systemctl --user daemon-reload
-    systemctl --user enable tty-clipboard-bridge.service
-    systemctl --user start tty-clipboard-bridge.service
+    systemctl --user enable tty-cb-bridge.service
+    systemctl --user start tty-cb-bridge.service
     
     echo "✓ Wayland bridge service enabled and started"
     echo ""
     echo "Wayland bridge setup complete!"
     echo "  Script: ~/.local/bin/wayland-bridge.sh"
-    echo "  Service: tty-clipboard-bridge.service"
+    echo "  Service: tty-cb-bridge.service"
     echo ""
     echo "The bridge syncs clipboard bidirectionally:"
     echo "  • Copy in GUI apps → available in terminal"
     echo "  • Copy in terminal → available in GUI apps"
     echo ""
     echo "Manage the service:"
-    echo "  Status:  systemctl --user status tty-clipboard-bridge.service"
-    echo "  Logs:    journalctl --user -u tty-clipboard-bridge.service -f"
-    echo "  Stop:    systemctl --user stop tty-clipboard-bridge.service"
-    echo "  Restart: systemctl --user restart tty-clipboard-bridge.service"
+    echo "  Status:  systemctl --user status tty-cb-bridge.service"
+    echo "  Logs:    journalctl --user -u tty-cb-bridge.service -f"
+    echo "  Stop:    systemctl --user stop tty-cb-bridge.service"
+    echo "  Restart: systemctl --user restart tty-cb-bridge.service"
     echo ""
     echo "Enable debug logging (to troubleshoot clipboard sync issues):"
-    echo "  1. Edit: ~/.config/systemd/user/tty-clipboard-bridge.service"
+    echo "  1. Edit: ~/.config/systemd/user/tty-cb-bridge.service"
     echo "  2. Change ExecStart line to: ExecStart=%h/.local/bin/wayland-bridge.sh -d localhost ${ALL_PORTS}"
     echo "  3. Reload: systemctl --user daemon-reload"
-    echo "  4. Restart: systemctl --user restart tty-clipboard-bridge.service"
-    echo "  5. View logs: journalctl --user -u tty-clipboard-bridge.service -f"
+    echo "  4. Restart: systemctl --user restart tty-cb-bridge.service"
+    echo "  5. View logs: journalctl --user -u tty-cb-bridge.service -f"
     echo ""
 fi
 
@@ -566,7 +566,7 @@ if [ "$INSTALL_WAYLAND_BRIDGE" = true ] && [ "$BRIDGE_TYPE" = "klipper" ]; then
         ALL_PORTS="$LOCAL_PORT"
     fi
 
-    cat > "$HOME/.config/systemd/user/tty-clipboard-bridge.service" << BRIDGEEOF
+    cat > "$HOME/.config/systemd/user/tty-cb-bridge.service" << BRIDGEEOF
 [Unit]
 Description=KDE Klipper Clipboard Bridge for tty-clipboard
 Documentation=https://github.com/igaw/tty-clipboard
@@ -589,35 +589,35 @@ BRIDGEEOF
         echo "✓ Klipper bridge configured for ports: ${ALL_PORTS}"
     fi
     
-    echo "✓ Systemd service created: tty-clipboard-bridge.service"
+    echo "✓ Systemd service created: tty-cb-bridge.service"
     
     # Enable and start the service
     systemctl --user daemon-reload
-    systemctl --user enable tty-clipboard-bridge.service
-    systemctl --user start tty-clipboard-bridge.service
+    systemctl --user enable tty-cb-bridge.service
+    systemctl --user start tty-cb-bridge.service
     
     echo "✓ Klipper bridge service enabled and started"
     echo ""
     echo "Klipper bridge setup complete!"
     echo "  Script: ~/.local/bin/klipper-bridge.sh"
-    echo "  Service: tty-clipboard-bridge.service"
+    echo "  Service: tty-cb-bridge.service"
     echo ""
     echo "The bridge syncs clipboard bidirectionally:"
     echo "  • Copy in GUI apps → available in terminal"
     echo "  • Copy in terminal → available in GUI apps"
     echo ""
     echo "Manage the service:"
-    echo "  Status:  systemctl --user status tty-clipboard-bridge.service"
-    echo "  Logs:    journalctl --user -u tty-clipboard-bridge.service -f"
-    echo "  Stop:    systemctl --user stop tty-clipboard-bridge.service"
-    echo "  Restart: systemctl --user restart tty-clipboard-bridge.service"
+    echo "  Status:  systemctl --user status tty-cb-bridge.service"
+    echo "  Logs:    journalctl --user -u tty-cb-bridge.service -f"
+    echo "  Stop:    systemctl --user stop tty-cb-bridge.service"
+    echo "  Restart: systemctl --user restart tty-cb-bridge.service"
     echo ""
     echo "Enable debug logging (to troubleshoot clipboard sync issues):"
-    echo "  1. Edit: ~/.config/systemd/user/tty-clipboard-bridge.service"
+    echo "  1. Edit: ~/.config/systemd/user/tty-cb-bridge.service"
     echo "  2. Change ExecStart line to: ExecStart=%h/.local/bin/klipper-bridge.sh -d localhost ${ALL_PORTS}"
     echo "  3. Reload: systemctl --user daemon-reload"
-    echo "  4. Restart: systemctl --user restart tty-clipboard-bridge.service"
-    echo "  5. View logs: journalctl --user -u tty-clipboard-bridge.service -f"
+    echo "  4. Restart: systemctl --user restart tty-cb-bridge.service"
+    echo "  5. View logs: journalctl --user -u tty-cb-bridge.service -f"
     echo ""
 fi
 
