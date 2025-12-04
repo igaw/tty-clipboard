@@ -16,8 +16,10 @@ Arguments:
 
 Options:
     -p, --port PORT      Local port for SSH LocalForward (default: auto-detect)
-    --bridge-ports LIST  Comma-separated port list for Wayland bridge (overrides auto-detect)
+    --bridge-ports LIST  Comma-separated port list for clipboard bridge (overrides auto-detect)
     -w, --wayland-bridge Install and configure Wayland clipboard bridge service
+    -k, --klipper-bridge Install and configure KDE Klipper clipboard bridge service
+    --auto-bridge        Auto-detect and install appropriate clipboard bridge
     -h, --help           Show this help message
 
 This script will:
@@ -27,17 +29,22 @@ This script will:
   4. Copy server and client binaries to remote ~/.local/bin
   5. Create a systemd user service to start the server on login
   6. Update local ~/.ssh/config with LocalForward (if hostname entry exists)
-  7. Optionally install Wayland bridge systemd service (-w flag)
+  7. Optionally install clipboard bridge systemd service (-w, -k, or --auto-bridge flags)
 
 Example:
     $0 myserver.example.com
     $0 myserver.example.com ./builddir
     $0 -p 5458 server2.com               # Use specific local port
-    $0 -w myserver.example.com           # Also install Wayland bridge
+    $0 -w myserver.example.com           # Install Wayland bridge
+    $0 -k myserver.example.com           # Install Klipper bridge
+    $0 --auto-bridge myserver.example.com # Auto-detect and install appropriate bridge
 
 Note: By default, ports are auto-detected. If a host already has a LocalForward
       configured, that port is reused. Otherwise, the next available port starting
       from 5457 is assigned. Use -p to override and specify a custom port.
+      
+      With --auto-bridge, the script will detect whether Wayland or KDE Klipper is
+      available and install the appropriate clipboard bridge automatically.
       
       For multi-server clipboard sync, run this script once for each server:
         $0 -p 5457 server1.com
@@ -58,6 +65,45 @@ fi
 LOCAL_PORT=""
 BRIDGE_PORTS_OVERRIDE=""
 INSTALL_WAYLAND_BRIDGE=false
+BRIDGE_TYPE=""  # Will be set to 'wayland' or 'klipper' based on detection
+
+# Function to detect desktop environment and determine clipboard bridge type
+detect_clipboard_bridge() {
+    # Check for KDE Plasma / Klipper
+    if [ -n "${KDE_FULL_SESSION:-}" ] || [ -n "${KDE_SESSION_VERSION:-}" ] || [ -n "${KDEDIR:-}" ]; then
+        # KDE Plasma is running, check if Klipper D-Bus service is available
+        if command -v qdbus-qt6 &>/dev/null || command -v qdbus-qt5 &>/dev/null; then
+            BRIDGE_TYPE="klipper"
+            return 0
+        fi
+    fi
+    
+    # Check for Wayland
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        # Check if wl-clipboard is available
+        if command -v wl-copy &>/dev/null && command -v wl-paste &>/dev/null; then
+            BRIDGE_TYPE="wayland"
+            return 0
+        fi
+    fi
+    
+    # Check XDG_SESSION_TYPE
+    if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+        if command -v wl-copy &>/dev/null && command -v wl-paste &>/dev/null; then
+            BRIDGE_TYPE="wayland"
+            return 0
+        fi
+    elif [ "${XDG_SESSION_TYPE:-}" = "x11" ] || [ "${XDG_SESSION_TYPE:-}" = "kde" ]; then
+        if command -v qdbus-qt6 &>/dev/null || command -v qdbus-qt5 &>/dev/null; then
+            BRIDGE_TYPE="klipper"
+            return 0
+        fi
+    fi
+    
+    # No suitable bridge detected
+    BRIDGE_TYPE=""
+    return 1
+}
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -70,6 +116,17 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -w|--wayland-bridge)
+            INSTALL_WAYLAND_BRIDGE=true
+            BRIDGE_TYPE="wayland"
+            shift
+            ;;
+        -k|--klipper-bridge)
+            INSTALL_WAYLAND_BRIDGE=true
+            BRIDGE_TYPE="klipper"
+            shift
+            ;;
+        --auto-bridge)
+            # Auto-detect the appropriate bridge (default behavior)
             INSTALL_WAYLAND_BRIDGE=true
             shift
             ;;
@@ -354,10 +411,26 @@ echo "  Certificates location: ~/.config/tty-clipboard/"
 echo "  Service: tty-clipboard.service (systemd user service)"
 echo ""
 
-# Install Wayland bridge if requested
+# Install clipboard bridge if requested
 if [ "$INSTALL_WAYLAND_BRIDGE" = true ]; then
+    # Auto-detect bridge type if not explicitly specified
+    if [ -z "$BRIDGE_TYPE" ]; then
+        echo "Detecting available clipboard bridge..."
+        if detect_clipboard_bridge; then
+            echo "✓ Detected: $BRIDGE_TYPE"
+        else
+            echo "⚠ Warning: No suitable clipboard bridge detected"
+            echo "   - For Wayland: install wl-clipboard"
+            echo "   - For KDE Plasma: install qdbus-qt5 or qdbus-qt6"
+            INSTALL_WAYLAND_BRIDGE=false
+        fi
+    fi
+fi
+
+# Install Wayland bridge if requested
+if [ "$INSTALL_WAYLAND_BRIDGE" = true ] && [ "$BRIDGE_TYPE" = "wayland" ]; then
     echo "=========================================="
-    echo "Installing Wayland bridge..."
+    echo "Installing Wayland clipboard bridge..."
     echo "=========================================="
     echo ""
     
@@ -441,6 +514,107 @@ BRIDGEEOF
     echo "Enable debug logging (to troubleshoot clipboard sync issues):"
     echo "  1. Edit: ~/.config/systemd/user/tty-clipboard-bridge.service"
     echo "  2. Change ExecStart line to: ExecStart=%h/.local/bin/wayland-bridge.sh -d localhost ${ALL_PORTS}"
+    echo "  3. Reload: systemctl --user daemon-reload"
+    echo "  4. Restart: systemctl --user restart tty-clipboard-bridge.service"
+    echo "  5. View logs: journalctl --user -u tty-clipboard-bridge.service -f"
+    echo ""
+fi
+
+# Install Klipper bridge if requested
+if [ "$INSTALL_WAYLAND_BRIDGE" = true ] && [ "$BRIDGE_TYPE" = "klipper" ]; then
+    echo "=========================================="
+    echo "Installing KDE Klipper clipboard bridge..."
+    echo "=========================================="
+    echo ""
+    
+    # Check if qdbus is installed
+    if ! command -v qdbus-qt6 &> /dev/null && ! command -v qdbus-qt5 &> /dev/null; then
+        echo "⚠ Warning: qdbus-qt5 or qdbus-qt6 not found. Please install Qt development tools:"
+        echo "  Debian/Ubuntu: sudo apt install qt6-tools or qt5-qmake"
+        echo "  Fedora:        sudo dnf install qt6-qtbase or qt5-qtbase"
+        echo "  Arch:          sudo pacman -S qt6-base or qt5-base"
+        echo ""
+    fi
+    
+    # Check if dbus-monitor is installed
+    if ! command -v dbus-monitor &> /dev/null; then
+        echo "⚠ Warning: dbus-monitor not found. Please install dbus package:"
+        echo "  Debian/Ubuntu: sudo apt install dbus"
+        echo "  Fedora:        sudo dnf install dbus"
+        echo "  Arch:          sudo pacman -S dbus"
+        echo ""
+    fi
+    
+    # Copy klipper-bridge.sh script
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    cp "$SCRIPT_DIR/klipper-bridge.sh" "$HOME/.local/bin/"
+    chmod +x "$HOME/.local/bin/klipper-bridge.sh"
+    echo "✓ Klipper bridge script installed to ~/.local/bin/klipper-bridge.sh"
+    
+    # Create systemd user service for Klipper bridge
+    mkdir -p "$HOME/.config/systemd/user"
+    
+    # Discover all configured local ports from SSH config to enable multi-server bridge
+    # If user provided explicit list, use it; otherwise detect from SSH config
+    if [ -n "$BRIDGE_PORTS_OVERRIDE" ]; then
+        ALL_PORTS="$BRIDGE_PORTS_OVERRIDE"
+    else
+        ALL_PORTS=$(python3 "$SCRIPT_DIR/update-ssh-localforward.py" ignored --list-all-ports --config "$SSH_CONFIG" 2>/dev/null || true)
+    fi
+    if [ -z "$ALL_PORTS" ]; then
+        # Fallback to the single port provided/auto-detected
+        ALL_PORTS="$LOCAL_PORT"
+    fi
+
+    cat > "$HOME/.config/systemd/user/tty-clipboard-bridge.service" << BRIDGEEOF
+[Unit]
+Description=KDE Klipper Clipboard Bridge for tty-clipboard
+Documentation=https://github.com/igaw/tty-clipboard
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/klipper-bridge.sh localhost ${ALL_PORTS}
+Restart=on-failure
+RestartSec=5
+Environment="HOME=%h"
+
+[Install]
+WantedBy=default.target
+BRIDGEEOF
+    
+    if [ -n "$BRIDGE_PORTS_OVERRIDE" ]; then
+        echo "✓ Klipper bridge configured for overridden ports: ${ALL_PORTS}"
+    else
+        echo "✓ Klipper bridge configured for ports: ${ALL_PORTS}"
+    fi
+    
+    echo "✓ Systemd service created: tty-clipboard-bridge.service"
+    
+    # Enable and start the service
+    systemctl --user daemon-reload
+    systemctl --user enable tty-clipboard-bridge.service
+    systemctl --user start tty-clipboard-bridge.service
+    
+    echo "✓ Klipper bridge service enabled and started"
+    echo ""
+    echo "Klipper bridge setup complete!"
+    echo "  Script: ~/.local/bin/klipper-bridge.sh"
+    echo "  Service: tty-clipboard-bridge.service"
+    echo ""
+    echo "The bridge syncs clipboard bidirectionally:"
+    echo "  • Copy in GUI apps → available in terminal"
+    echo "  • Copy in terminal → available in GUI apps"
+    echo ""
+    echo "Manage the service:"
+    echo "  Status:  systemctl --user status tty-clipboard-bridge.service"
+    echo "  Logs:    journalctl --user -u tty-clipboard-bridge.service -f"
+    echo "  Stop:    systemctl --user stop tty-clipboard-bridge.service"
+    echo "  Restart: systemctl --user restart tty-clipboard-bridge.service"
+    echo ""
+    echo "Enable debug logging (to troubleshoot clipboard sync issues):"
+    echo "  1. Edit: ~/.config/systemd/user/tty-clipboard-bridge.service"
+    echo "  2. Change ExecStart line to: ExecStart=%h/.local/bin/klipper-bridge.sh -d localhost ${ALL_PORTS}"
     echo "  3. Reload: systemctl --user daemon-reload"
     echo "  4. Restart: systemctl --user restart tty-clipboard-bridge.service"
     echo "  5. View logs: journalctl --user -u tty-clipboard-bridge.service -f"

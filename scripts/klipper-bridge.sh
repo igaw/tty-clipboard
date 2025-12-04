@@ -23,11 +23,10 @@ Options:
     -s, --stop       Stop existing bridge processes
     -v, --verbose    Enable verbose output
     -d, --debug      Enable debug logging (shows clipboard operations)
-    -q, --qt-version Specify Qt version: 5 or 6 (default: auto-detect)
 
 Requirements:
     - KDE Plasma (Klipper)
-    - qdbus-qt5 or qdbus-qt6
+    - qdbus-qt6 (Qt6 development tools)
     - dbus-monitor (part of dbus package)
     - tty-cb-client
 
@@ -37,7 +36,6 @@ Example:
     $0 localhost 5457               # Explicit single port
     $0 192.168.1.100 5458           # Bridge to remote server
     $0 --stop                       # Stop all bridge processes
-    $0 -q 5 localhost 5457          # Use Qt5 with specific server
 
 Multi-port usage:
     When multiple ports are specified, the bridge monitors all ports for
@@ -51,7 +49,6 @@ DEBUG=false
 STOP=false
 SERVER="localhost"
 PORTS="5457"
-QT_VERSION=""
 
 # Debug logging function
 debug_log() {
@@ -78,10 +75,6 @@ while [[ $# -gt 0 ]]; do
         -d|--debug)
             DEBUG=true
             shift
-            ;;
-        -q|--qt-version)
-            QT_VERSION="$2"
-            shift 2
             ;;
         -*)
             echo "Error: Unknown option: $1"
@@ -114,30 +107,15 @@ if [ -d "$LOCAL_BIN_DIR" ]; then
     export PATH="$LOCAL_BIN_DIR:${PATH}"
 fi
 
-# Auto-detect Qt version if not specified
-if [ -z "$QT_VERSION" ]; then
-    if command -v qdbus-qt6 &> /dev/null; then
-        QT_VERSION="6"
-    elif command -v qdbus-qt5 &> /dev/null; then
-        QT_VERSION="5"
-    else
-        echo "Error: Neither qdbus-qt6 nor qdbus-qt5 found. Please install Qt development tools."
-        exit 1
-    fi
-    debug_log "Auto-detected Qt version: $QT_VERSION"
-fi
-
-# Validate Qt version
-if [ "$QT_VERSION" != "5" ] && [ "$QT_VERSION" != "6" ]; then
-    echo "Error: Qt version must be 5 or 6, got: $QT_VERSION"
-    exit 1
-fi
-
-QDBUS="qdbus-qt${QT_VERSION}"
+# Use Qt6 qdbus
+QDBUS="qdbus-qt6"
 
 # Check dependencies
 if ! command -v "$QDBUS" &> /dev/null; then
-    echo "Error: $QDBUS not found. Please install Qt${QT_VERSION} development tools."
+    echo "Error: qdbus-qt6 not found. Please install Qt6 development tools."
+    echo "  Debian/Ubuntu: sudo apt install qt6-tools"
+    echo "  Fedora:        sudo dnf install qt6-qtbase"
+    echo "  Arch:          sudo pacman -S qt6-base"
     exit 1
 fi
 
@@ -292,7 +270,6 @@ if [ "$VERBOSE" = true ] || [ "$DEBUG" = true ]; then
     echo "=========================================="
     echo "Server: $SERVER"
     echo "Ports: $PORTS"
-    echo "Qt Version: $QT_VERSION"
     echo "Klipper→TTY PID: $KLIPPER_TO_TTY_PID"
     echo "TTY→Klipper PID: $TTY_TO_KLIPPER_PID"
     if [ "$DEBUG" = true ]; then
