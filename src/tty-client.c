@@ -24,6 +24,26 @@
 #include <arpa/inet.h>
 #include <stdint.h>
 #include <endian.h>
+#include <sys/select.h>
+#include <poll.h>
+
+// mbedTLS context structures
+typedef struct {
+	mbedtls_ssl_context ssl;
+	mbedtls_ssl_config conf;
+	mbedtls_x509_crt cacert;
+	mbedtls_x509_crt clicert;
+	mbedtls_pk_context pkey;
+	mbedtls_entropy_context entropy;
+	mbedtls_ctr_drbg_context ctr_drbg;
+} ssl_context_t;
+
+// Connection info for multiple servers
+typedef struct {
+	int sock_fd;
+	int port;
+	ssl_context_t *ssl_ctx;
+} connection_t;
 
 static void tls_debug(void *ctx, int level, const char *file, int line, const char *msg)
 {
@@ -71,17 +91,6 @@ static int ssl_recv_callback(void *ctx, unsigned char *buf, size_t len)
 		return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
 	return (int)ret;
 }
-
-// mbedTLS context structures
-typedef struct {
-	mbedtls_ssl_context ssl;
-	mbedtls_ssl_config conf;
-	mbedtls_x509_crt cacert;
-	mbedtls_x509_crt clicert;
-	mbedtls_pk_context pkey;
-	mbedtls_entropy_context entropy;
-	mbedtls_ctr_drbg_context ctr_drbg;
-} ssl_context_t;
 
 volatile sig_atomic_t terminate = 0;
 
@@ -147,6 +156,119 @@ static Ttycb__Envelope *pb_recv_envelope(ssl_context_t *ssl_ctx)
 	if (!e)
 		handle_error("unpack");
 	return e;
+}
+
+// Forward declarations
+static ssl_context_t *init_ssl_context(void);
+static int connect_to_server(const char *server_ip, int port, ssl_context_t *ssl_ctx,
+			       int *sock_fd);
+
+static int parse_ports(const char *port_str, int **ports_out, int *count_out)
+{
+	// Count commas to determine number of ports
+	int count = 1;
+	for (const char *p = port_str; *p; p++) {
+		if (*p == ',')
+			count++;
+	}
+	
+	int *ports = malloc(sizeof(int) * count);
+	if (!ports)
+		return -1;
+	
+	char *str_copy = strdup(port_str);
+	if (!str_copy) {
+		free(ports);
+		return -1;
+	}
+	
+	int idx = 0;
+	char *token = strtok(str_copy, ",");
+	while (token && idx < count) {
+		int port = atoi(token);
+		if (port <= 0 || port > 65535) {
+			fprintf(stderr, "Error: Invalid port number: %s\n", token);
+			free(str_copy);
+			free(ports);
+			return -1;
+		}
+		ports[idx++] = port;
+		token = strtok(NULL, ",");
+	}
+	
+	free(str_copy);
+	*ports_out = ports;
+	*count_out = idx;
+	return 0;
+}
+
+static connection_t *create_connections(const char *server_ip, int *ports,
+					 int port_count)
+{
+	connection_t *conns = calloc(port_count, sizeof(connection_t));
+	if (!conns)
+		return NULL;
+	
+	for (int i = 0; i < port_count; i++) {
+		conns[i].port = ports[i];
+		conns[i].ssl_ctx = init_ssl_context();
+		if (!conns[i].ssl_ctx) {
+			// Cleanup previous connections
+			for (int j = 0; j < i; j++) {
+				close(conns[j].sock_fd);
+				mbedtls_ssl_free(&conns[j].ssl_ctx->ssl);
+				mbedtls_ssl_config_free(&conns[j].ssl_ctx->conf);
+				mbedtls_x509_crt_free(&conns[j].ssl_ctx->cacert);
+				mbedtls_x509_crt_free(&conns[j].ssl_ctx->clicert);
+				mbedtls_pk_free(&conns[j].ssl_ctx->pkey);
+				mbedtls_entropy_free(&conns[j].ssl_ctx->entropy);
+				mbedtls_ctr_drbg_free(&conns[j].ssl_ctx->ctr_drbg);
+				free(conns[j].ssl_ctx);
+			}
+			free(conns);
+			return NULL;
+		}
+		
+		if (connect_to_server(server_ip, ports[i], conns[i].ssl_ctx,
+				      &conns[i].sock_fd) != 0) {
+			LOG_ERROR("Failed to connect to port %d", ports[i]);
+			// Cleanup
+			for (int j = 0; j <= i; j++) {
+				if (j < i)
+					close(conns[j].sock_fd);
+				mbedtls_ssl_free(&conns[j].ssl_ctx->ssl);
+				mbedtls_ssl_config_free(&conns[j].ssl_ctx->conf);
+				mbedtls_x509_crt_free(&conns[j].ssl_ctx->cacert);
+				mbedtls_x509_crt_free(&conns[j].ssl_ctx->clicert);
+				mbedtls_pk_free(&conns[j].ssl_ctx->pkey);
+				mbedtls_entropy_free(&conns[j].ssl_ctx->entropy);
+				mbedtls_ctr_drbg_free(&conns[j].ssl_ctx->ctr_drbg);
+				free(conns[j].ssl_ctx);
+			}
+			free(conns);
+			return NULL;
+		}
+		LOG_INFO("Connected to %s:%d", server_ip, ports[i]);
+	}
+	
+	return conns;
+}
+
+static void cleanup_connections(connection_t *conns, int count)
+{
+	for (int i = 0; i < count; i++) {
+		mbedtls_ssl_close_notify(&conns[i].ssl_ctx->ssl);
+		close(conns[i].sock_fd);
+		mbedtls_ssl_free(&conns[i].ssl_ctx->ssl);
+		mbedtls_ssl_config_free(&conns[i].ssl_ctx->conf);
+		mbedtls_x509_crt_free(&conns[i].ssl_ctx->cacert);
+		mbedtls_x509_crt_free(&conns[i].ssl_ctx->clicert);
+		mbedtls_pk_free(&conns[i].ssl_ctx->pkey);
+		mbedtls_entropy_free(&conns[i].ssl_ctx->entropy);
+		mbedtls_ctr_drbg_free(&conns[i].ssl_ctx->ctr_drbg);
+		free(conns[i].ssl_ctx);
+	}
+	free(conns);
 }
 
 ssl_context_t *init_ssl_context()
@@ -325,11 +447,15 @@ static void print_usage(const char *prog_name)
 	printf("  -V, --version    Display version information\n");
 	printf("  -v, --verbose    Enable verbose logging (repeat for more detail)\n");
 	printf("  -s, --server IP  Server IP address (default: 127.0.0.1)\n");
-	printf("  -p, --port PORT  Server port (default: %d)\n", SERVER_PORT);
+	printf("  -p, --port PORTS Server port(s), comma-separated (default: %d)\n", SERVER_PORT);
 	printf("\nExamples:\n");
 	printf("  %s write                          # Write to localhost:5457\n",
 	       prog_name);
 	printf("  %s read                           # Read from localhost:5457\n",
+	       prog_name);
+	printf("  %s -p 5457,5458 write             # Write to multiple ports\n",
+	       prog_name);
+	printf("  %s -p 5457,5458,5459 read_blocked # Monitor multiple servers\n",
 	       prog_name);
 	printf("  %s -s 192.168.1.100 write         # Write to remote server\n",
 	       prog_name);
@@ -339,6 +465,9 @@ static void print_usage(const char *prog_name)
 	       prog_name);
 	printf("  %s -v -v write                    # Write with DEBUG logging\n",
 	       prog_name);
+	printf("\nMulti-port usage:\n");
+	printf("  When multiple ports are specified, write operations send to all ports,\n");
+	printf("  and read operations return the first available update from any port.\n");
 	printf("\n");
 }
 
@@ -355,6 +484,7 @@ static void setup_signal_handler(void)
 	sa.sa_flags = 0;
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);  // Also handle SIGTERM for graceful shutdown
 }
 
 static uint64_t generate_client_id(ssl_context_t *ssl_ctx)
@@ -632,11 +762,175 @@ static void do_write_subscribe(ssl_context_t *ssl_ctx, uint64_t client_id,
 	do_subscribe(ssl_ctx, client_id);
 }
 
+// Multi-port operations
+static void do_write_multi(connection_t *conns, int count, uint64_t client_id)
+{
+	size_t used;
+	LOG_DEBUG("Reading data from stdin for multi-port write operation");
+	uint8_t *buf = read_stdin_to_buffer(&used);
+	LOG_DEBUG("Read %zu bytes from stdin, writing to %d port(s)", used, count);
+
+	int success_count = 0;
+	for (int i = 0; i < count; i++) {
+		Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
+		Ttycb__WriteRequest wr = TTYCB__WRITE_REQUEST__INIT;
+		wr.data.data = buf;
+		wr.data.len = used;
+		wr.client_id = client_id;
+		env.write = &wr;
+		env.body_case = TTYCB__ENVELOPE__BODY_WRITE;
+		
+		LOG_DEBUG("Sending write request to port %d", conns[i].port);
+		pb_send_envelope(conns[i].ssl_ctx, &env);
+		
+		LOG_DEBUG("Waiting for write response from port %d", conns[i].port);
+		Ttycb__Envelope *resp = pb_recv_envelope(conns[i].ssl_ctx);
+		if (resp && resp->body_case == TTYCB__ENVELOPE__BODY_WRITE_RESP &&
+		    resp->write_resp && resp->write_resp->ok) {
+			LOG_INFO("Write to port %d completed, message_id: %lu",
+				 conns[i].port, resp->write_resp->message_id);
+			success_count++;
+		} else {
+			LOG_ERROR("Write to port %d failed", conns[i].port);
+		}
+		ttycb__envelope__free_unpacked(resp, NULL);
+	}
+	
+	free(buf);
+	LOG_INFO("Write operation completed for %d/%d port(s)", success_count, count);
+}
+
+static void do_read_multi(connection_t *conns, int count)
+{
+	LOG_DEBUG("Sending read requests to %d port(s)", count);
+	
+	// Send read request to all ports
+	for (int i = 0; i < count; i++) {
+		Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
+		Ttycb__ReadRequest rd = TTYCB__READ_REQUEST__INIT;
+		env.read = &rd;
+		env.body_case = TTYCB__ENVELOPE__BODY_READ;
+		pb_send_envelope(conns[i].ssl_ctx, &env);
+		LOG_DEBUG("Read request sent to port %d", conns[i].port);
+	}
+	
+	// Wait for first response using poll
+	struct pollfd *fds = malloc(sizeof(struct pollfd) * count);
+	if (!fds)
+		handle_error("malloc pollfd");
+	
+	for (int i = 0; i < count; i++) {
+		fds[i].fd = conns[i].sock_fd;
+		fds[i].events = POLLIN;
+	}
+	
+	LOG_DEBUG("Waiting for data from any port");
+	int ret = poll(fds, count, -1);
+	if (ret < 0) {
+		free(fds);
+		handle_error("poll");
+	}
+	
+	// Read from first available port
+	for (int i = 0; i < count; i++) {
+		if (fds[i].revents & POLLIN) {
+			LOG_DEBUG("Data available from port %d", conns[i].port);
+			Ttycb__Envelope *resp = pb_recv_envelope(conns[i].ssl_ctx);
+			if (resp && resp->body_case == TTYCB__ENVELOPE__BODY_DATA &&
+			    resp->data) {
+				LOG_INFO("Received data from port %d, size: %zu bytes, message_id: %lu",
+					 conns[i].port, resp->data->data.len,
+					 resp->data->message_id);
+				fwrite(resp->data->data.data, 1,
+				       resp->data->data.len, stdout);
+				fflush(stdout);
+				ttycb__envelope__free_unpacked(resp, NULL);
+				free(fds);
+				return;
+			}
+			ttycb__envelope__free_unpacked(resp, NULL);
+		}
+	}
+	
+	free(fds);
+	LOG_ERROR("No valid data received from any port");
+}
+
+static void do_subscribe_multi(connection_t *conns, int count, uint64_t client_id)
+{
+	LOG_INFO("Starting subscription to %d port(s)", count);
+	
+	// Send subscribe request to all ports
+	for (int i = 0; i < count; i++) {
+		Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
+		Ttycb__SubscribeRequest sub = TTYCB__SUBSCRIBE_REQUEST__INIT;
+		sub.client_id = client_id;
+		env.subscribe = &sub;
+		env.body_case = TTYCB__ENVELOPE__BODY_SUBSCRIBE;
+		pb_send_envelope(conns[i].ssl_ctx, &env);
+		LOG_DEBUG("Subscribe request sent to port %d", conns[i].port);
+	}
+	
+	// Setup poll fds
+	struct pollfd *fds = malloc(sizeof(struct pollfd) * count);
+	if (!fds)
+		handle_error("malloc pollfd");
+	
+	for (int i = 0; i < count; i++) {
+		fds[i].fd = conns[i].sock_fd;
+		fds[i].events = POLLIN;
+	}
+	
+	LOG_DEBUG("Entering multi-port subscription loop");
+	// Loop receiving updates from any port
+	while (!terminate) {
+		int ret = poll(fds, count, 1000); // 1 second timeout
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+			free(fds);
+			handle_error("poll");
+		}
+		
+		if (ret == 0)
+			continue; // timeout, check terminate flag
+		
+		// Check all ports for data
+		for (int i = 0; i < count; i++) {
+			if (fds[i].revents & POLLIN) {
+				Ttycb__Envelope *resp =
+					pb_recv_envelope(conns[i].ssl_ctx);
+				if (!resp) {
+					LOG_DEBUG("Connection closed on port %d",
+						  conns[i].port);
+					fds[i].fd = -1; // Mark as closed
+					continue;
+				}
+				
+				if (resp->body_case == TTYCB__ENVELOPE__BODY_DATA &&
+				    resp->data) {
+					LOG_DEBUG("Received update from port %d, size: %zu bytes, message_id: %lu",
+						  conns[i].port,
+						  resp->data->data.len,
+						  resp->data->message_id);
+					fwrite(resp->data->data.data, 1,
+					       resp->data->data.len, stdout);
+					fflush(stdout);
+				}
+				ttycb__envelope__free_unpacked(resp, NULL);
+			}
+		}
+	}
+	
+	free(fds);
+	LOG_INFO("Multi-port subscription ended");
+}
+
 int main(int argc, char *argv[])
 {
 	const char *role = NULL;
 	const char *server_ip = "127.0.0.1";
-	int server_port = SERVER_PORT;
+	const char *port_str = NULL;
 	int opt;
 	int verbose_count = 0;
 
@@ -667,11 +961,7 @@ int main(int argc, char *argv[])
 			server_ip = optarg;
 			break;
 		case 'p':
-			server_port = atoi(optarg);
-			if (server_port <= 0 || server_port > 65535) {
-				fprintf(stderr, "Error: Invalid port number: %s\n", optarg);
-				exit(EXIT_FAILURE);
-			}
+			port_str = optarg;
 			break;
 		default:
 			print_usage(argv[0]);
@@ -708,49 +998,82 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
+	// Parse ports
+	int *ports = NULL;
+	int port_count = 0;
+	
+	if (!port_str) {
+		// Default to single port
+		ports = malloc(sizeof(int));
+		if (!ports)
+			handle_error("malloc");
+		ports[0] = SERVER_PORT;
+		port_count = 1;
+	} else {
+		if (parse_ports(port_str, &ports, &port_count) != 0) {
+			exit(EXIT_FAILURE);
+		}
+	}
+	
+	LOG_INFO("Configured %d port(s)", port_count);
+
 	// Set up signal handling
 	setup_signal_handler();
 
-	// Initialize SSL context
-	LOG_INFO("Initializing SSL context");
-	ssl_context_t *ssl_ctx = init_ssl_context();
+	// Create connections to all ports
+	LOG_INFO("Creating connections to %s", server_ip);
+	connection_t *conns = create_connections(server_ip, ports, port_count);
+	if (!conns) {
+		fprintf(stderr, "Failed to establish connections\n");
+		free(ports);
+		exit(EXIT_FAILURE);
+	}
 
 	// Generate a random non-zero client_id
-	uint64_t client_id = generate_client_id(ssl_ctx);
+	uint64_t client_id = generate_client_id(conns[0].ssl_ctx);
 	LOG_DEBUG("Generated client_id: %lu", client_id);
-
-	// Connect to server
-	LOG_INFO("Connecting to server %s:%d", server_ip, server_port);
-	int sock;
-	connect_to_server(server_ip, server_port, ssl_ctx, &sock);
 
 	// Execute the requested role
 	LOG_INFO("Executing command: %s", role);
-	if (strcmp(role, "write") == 0) {
-		do_write(ssl_ctx, client_id, sock);
-	} else if (strcmp(role, "read") == 0) {
-		do_read(ssl_ctx, sock);
-	} else if (strcmp(role, "write_read") == 0) {
-		do_write_read(ssl_ctx, client_id, sock);
-	} else if (strcmp(role, "read_blocked") == 0) {
-		do_subscribe(ssl_ctx, client_id);
-	} else if (strcmp(role, "write_subscribe") == 0) {
-		do_write_subscribe(ssl_ctx, client_id, sock);
+	
+	if (port_count == 1) {
+		// Single port mode - use existing functions
+		if (strcmp(role, "write") == 0) {
+			do_write(conns[0].ssl_ctx, client_id, conns[0].sock_fd);
+		} else if (strcmp(role, "read") == 0) {
+			do_read(conns[0].ssl_ctx, conns[0].sock_fd);
+		} else if (strcmp(role, "write_read") == 0) {
+			do_write_read(conns[0].ssl_ctx, client_id,
+				      conns[0].sock_fd);
+		} else if (strcmp(role, "read_blocked") == 0) {
+			do_subscribe(conns[0].ssl_ctx, client_id);
+		} else if (strcmp(role, "write_subscribe") == 0) {
+			do_write_subscribe(conns[0].ssl_ctx, client_id,
+					   conns[0].sock_fd);
+		}
+	} else {
+		// Multi-port mode
+		if (strcmp(role, "write") == 0 ||
+		    strcmp(role, "write_read") == 0 ||
+		    strcmp(role, "write_subscribe") == 0) {
+			do_write_multi(conns, port_count, client_id);
+		}
+		
+		if (strcmp(role, "read") == 0 ||
+		    strcmp(role, "write_read") == 0) {
+			do_read_multi(conns, port_count);
+		}
+		
+		if (strcmp(role, "read_blocked") == 0 ||
+		    strcmp(role, "write_subscribe") == 0) {
+			do_subscribe_multi(conns, port_count, client_id);
+		}
 	}
+	
 	LOG_INFO("Command completed successfully");
 
-	// Initiate graceful shutdown
-	mbedtls_ssl_close_notify(&ssl_ctx->ssl);
-
 	// Clean up
-	close(sock);
-	mbedtls_ssl_free(&ssl_ctx->ssl);
-	mbedtls_ssl_config_free(&ssl_ctx->conf);
-	mbedtls_x509_crt_free(&ssl_ctx->cacert);
-	mbedtls_x509_crt_free(&ssl_ctx->clicert);
-	mbedtls_pk_free(&ssl_ctx->pkey);
-	mbedtls_entropy_free(&ssl_ctx->entropy);
-	mbedtls_ctr_drbg_free(&ssl_ctx->ctr_drbg);
-	free(ssl_ctx);
+	cleanup_connections(conns, port_count);
+	free(ports);
 	return 0;
 }

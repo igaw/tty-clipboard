@@ -252,3 +252,139 @@ SPC h r r  (or M-x doom/reload)
 - Works bidirectionally with tmux, tig, and other integrated tools
 
 **Note:** This integrates with Emacs' kill-ring, so all standard Emacs copy/paste operations will use tty-clipboard automatically. For Doom Emacs specifically, this works seamlessly with evil-mode yanking and pasting.
+
+## Wayland Desktop Integration
+
+For bidirectional clipboard sync between Wayland desktop environments (GNOME, KDE, Sway, etc.) and tty-clipboard:
+
+```bash
+# Start the bridge (syncs clipboard changes in both directions)
+./scripts/wayland-bridge.sh
+
+# Connect to remote server
+./scripts/wayland-bridge.sh 192.168.1.100
+
+# Monitor multiple remote servers simultaneously
+./scripts/wayland-bridge.sh localhost 5457,5458,5459
+
+# Stop the bridge
+./scripts/wayland-bridge.sh --stop
+```
+
+The bridge runs two background processes:
+- **Wayland → TTY**: Watches Wayland clipboard with `wl-paste -w`, writes changes to tty-clipboard
+- **TTY → Wayland**: Watches tty-clipboard with `read_blocked`, writes changes to Wayland clipboard
+
+**Multi-port support:**
+When multiple ports are specified (comma-separated), the bridge:
+- Monitors all ports for clipboard updates from any remote server
+- Writes to all ports when the Wayland clipboard changes
+- Enables seamless clipboard sync across multiple remote hosts
+
+**Requirements:**
+- `wl-clipboard` package (provides `wl-copy` and `wl-paste` commands)
+- `tty-cb-client` installed
+
+**Use cases:**
+- Copy from Firefox/Chrome → automatically available in terminal applications
+- Copy in tmux/vim → automatically available in GUI applications  
+- Seamless clipboard sync between desktop and multiple remote servers via tty-clipboard
+
+**Running as a systemd service:**
+
+The bridge is designed to run as a systemd user service for automatic startup:
+
+```bash
+# Install the script to user's local bin
+cp scripts/wayland-bridge.sh ~/.local/bin/
+chmod +x ~/.local/bin/wayland-bridge.sh
+
+# Create systemd user service
+mkdir -p ~/.config/systemd/user
+
+cat > ~/.config/systemd/user/tty-clipboard-bridge.service << 'EOF'
+[Unit]
+Description=Wayland Clipboard Bridge for tty-clipboard
+Documentation=https://github.com/igaw/tty-clipboard
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/wayland-bridge.sh localhost 5457,5458,5459
+ExecStop=%h/.local/bin/wayland-bridge.sh --stop
+Restart=on-failure
+RestartSec=5
+Environment="WAYLAND_DISPLAY=wayland-0"
+
+[Install]
+WantedBy=default.target
+EOF
+
+# Enable and start the service
+systemctl --user daemon-reload
+systemctl --user enable --now tty-clipboard-bridge.service
+
+# Check status
+systemctl --user status tty-clipboard-bridge.service
+```
+
+**Note:** Update the ExecStart line with your specific ports (e.g., `5457,5458,5459`
+for three remote servers).
+systemctl --user status tty-clipboard-bridge.service
+```
+
+**Auto-populating bridge ports from SSH config:**
+
+If you've configured multiple hosts with one LocalForward each, you can auto-populate
+the bridge's port list from your `~/.ssh/config` using the helper script:
+
+```bash
+# List all local ports used in LocalForward entries (sorted, unique)
+python3 scripts/update-ssh-localforward.py ignored --list-all-ports --config ~/.ssh/config
+# Example output:
+# 5457,5458,5459
+
+# Use that output to create the service dynamically
+PORTS=$(python3 scripts/update-ssh-localforward.py ignored --list-all-ports --config ~/.ssh/config)
+cat > ~/.config/systemd/user/tty-clipboard-bridge.service << EOF
+[Unit]
+Description=Wayland Clipboard Bridge for tty-clipboard
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/wayland-bridge.sh localhost ${PORTS}
+ExecStop=%h/.local/bin/wayland-bridge.sh --stop
+Restart=on-failure
+RestartSec=5
+Environment="WAYLAND_DISPLAY=wayland-0"
+
+[Install]
+WantedBy=default.target
+EOF
+systemctl --user daemon-reload
+systemctl --user enable --now tty-clipboard-bridge.service
+```
+
+You can also override the ports explicitly in `setup.sh` with:
+
+```bash
+./scripts/setup.sh myserver.example.com -w --bridge-ports 5457,5458,5459
+```
+
+**Managing the service:**
+
+```bash
+# View logs
+journalctl --user -u tty-clipboard-bridge.service -f
+
+# Stop the service
+systemctl --user stop tty-clipboard-bridge.service
+
+# Restart the service
+systemctl --user restart tty-clipboard-bridge.service
+
+# Disable auto-start
+systemctl --user disable tty-clipboard-bridge.service
+```
+
