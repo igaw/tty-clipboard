@@ -179,30 +179,41 @@ fi
 debug_log "Starting Wayland→TTY bridge process"
 
 (
+    last_content=""
     while true; do
-        if [ "$DEBUG" = true ]; then
-            # With debug: show what's being copied
-            wl-paste -w bash -c '
-                content=$(cat)
-                echo "[$(date +"%Y-%m-%d %H:%M:%S")] Wayland clipboard changed, sending to tty-clipboard ('"$SERVER"':'"$PORTS"')" >&2
-                echo "[$(date +"%Y-%m-%d %H:%M:%S")] Content length: ${#content} bytes" >&2
-                if [ ${#content} -lt 200 ]; then
-                    echo "[$(date +"%Y-%m-%d %H:%M:%S")] Content preview: $content" >&2
+        # Get current clipboard content
+        current_content=$(wl-paste 2>/dev/null || echo "")
+        
+        # Check if content has changed
+        if [ "$current_content" != "$last_content" ] && [ -n "$current_content" ]; then
+            if [ "$DEBUG" = true ]; then
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] Wayland clipboard changed, sending to tty-clipboard ($SERVER:$PORTS)" >&2
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] Content length: ${#current_content} bytes" >&2
+                if [ ${#current_content} -lt 200 ]; then
+                    echo "[$(date +'%Y-%m-%d %H:%M:%S')] Content preview: $current_content" >&2
                 fi
-                echo "$content" | tty-cb-client -p "'"$PORTS"'" write "'"$SERVER"'" 2>&1 | while read -r line; do
-                    echo "[$(date +"%Y-%m-%d %H:%M:%S")] tty-cb-client: $line" >&2
+            fi
+            
+            # Send to tty-clipboard
+            if [ "$DEBUG" = true ]; then
+                echo "$current_content" | tty-cb-client -p "$PORTS" write "$SERVER" 2>&1 | while read -r line; do
+                    echo "[$(date +'%Y-%m-%d %H:%M:%S')] tty-cb-client: $line" >&2
                 done
-            ' 2>&1 || sleep 1
-        else
-            # Without debug: normal operation
-            wl-paste -w tty-cb-client -p "$PORTS" write "$SERVER" 2>/dev/null || sleep 1
+            else
+                echo "$current_content" | tty-cb-client -p "$PORTS" write "$SERVER" 2>/dev/null
+            fi
+            
+            last_content="$current_content"
         fi
+        
+        # Poll every 0.5 seconds
+        sleep 0.5
     done
 ) &
 WAYLAND_TO_TTY_PID=$!
 echo $WAYLAND_TO_TTY_PID > "$PIDFILE_WAYLAND_TO_TTY"
 
-debug_log "Wayland→TTY bridge started with PID: $WAYLAND_TO_TTY_PID"
+debug_log "Wayland→TTY bridge started with PID: $WAYLAND_TO_TTY_PID (polling mode)"
 
 # TTY → Wayland: Watch tty-clipboard and write to Wayland clipboard
 if [ "$VERBOSE" = true ]; then
