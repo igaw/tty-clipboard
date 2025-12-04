@@ -268,8 +268,30 @@ fi
 debug_log "Bridge initialization complete"
 debug_log "Waiting for clipboard events..."
 
-# Cleanup handler
-trap 'kill $WAYLAND_TO_TTY_PID $TTY_TO_WAYLAND_PID 2>/dev/null; exit 0' INT TERM EXIT
+# Cleanup handler - kill process group to ensure all subprocesses are terminated
+cleanup() {
+    debug_log "Shutting down bridge..."
+    # Kill child processes and their subprocesses
+    if [ -n "${WAYLAND_TO_TTY_PID:-}" ]; then
+        kill -TERM -$WAYLAND_TO_TTY_PID 2>/dev/null || true
+    fi
+    if [ -n "${TTY_TO_WAYLAND_PID:-}" ]; then
+        kill -TERM -$TTY_TO_WAYLAND_PID 2>/dev/null || true
+    fi
+    # Give them a moment to terminate gracefully
+    sleep 0.2
+    # Force kill if still running
+    if [ -n "${WAYLAND_TO_TTY_PID:-}" ]; then
+        kill -KILL -$WAYLAND_TO_TTY_PID 2>/dev/null || true
+    fi
+    if [ -n "${TTY_TO_WAYLAND_PID:-}" ]; then
+        kill -KILL -$TTY_TO_WAYLAND_PID 2>/dev/null || true
+    fi
+    debug_log "Bridge stopped"
+    exit 0
+}
+
+trap 'cleanup' INT TERM EXIT
 
 # Keep the main script running by waiting for the child processes
 # If either exits, the main script will also exit (and systemd will restart it)
