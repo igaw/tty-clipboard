@@ -152,7 +152,7 @@ stop_bridge() {
 # Handle --stop flag
 if [ "$STOP" = true ]; then
     stop_bridge
-    exit 0
+    exit 0  # Always exit with success when stopping
 fi
 
 # Clean up stale PID files (don't try to stop processes, they may be from previous runs)
@@ -206,4 +206,4 @@ trap 'kill $WAYLAND_TO_TTY_PID $TTY_TO_WAYLAND_PID 2>/dev/null; exit 0' INT TERM
 
 # Keep the main script running by waiting for the child processes
 # If either exits, the main script will also exit (and systemd will restart it)
-wait $WAYLAND_TO_TTY_PID $TTY_TO_WAYLAND_PID
+wait $WAYLAND_TO_TTY_PID $TTY_TO_WAYLAND_PID || true
