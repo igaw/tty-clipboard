@@ -226,6 +226,143 @@ else
     test_failed=$((test_failed + 1))
 fi
 
+# Test 11: List all ports across hosts
+echo ""
+echo "=== Test 11: List all ports across hosts ==="
+cat > "$TEST_CONFIG" <<'EOF'
+Host a
+    LocalForward 127.0.0.1:5459 127.0.0.1:5457
+
+Host b
+    LocalForward 127.0.0.1:5457 127.0.0.1:5457
+
+Host c
+    LocalForward 127.0.0.1:5458 127.0.0.1:5457
+
+Host d
+    HostName d.example.com
+EOF
+
+PORT_LIST=$(python3 "$SCRIPT" ignored --list-all-ports --config "$TEST_CONFIG")
+if [ "$PORT_LIST" = "5457,5458,5459" ]; then
+    echo "✓ Test 11 passed (sorted, de-duplicated list)"
+    test_passed=$((test_passed + 1))
+else
+    echo "✗ Test 11 failed (expected '5457,5458,5459', got '$PORT_LIST')"
+    test_failed=$((test_failed + 1))
+fi
+
+# Test 12: List all ports on empty config
+echo ""
+echo "=== Test 12: List all ports on empty config ==="
+cat > "$TEST_CONFIG" <<'EOF'
+EOF
+
+PORT_LIST=$(python3 "$SCRIPT" ignored --list-all-ports --config "$TEST_CONFIG")
+if [ -z "$PORT_LIST" ]; then
+    echo "✓ Test 12 passed (empty list on empty config)"
+    test_passed=$((test_passed + 1))
+else
+    echo "✗ Test 12 failed (expected empty, got '$PORT_LIST')"
+    test_failed=$((test_failed + 1))
+fi
+
+# Test 8: Configure multiple hosts (one LocalForward per host)
+echo ""
+echo "=== Test 8: Configure multiple hosts (one LocalForward per host) ==="
+cat > "$TEST_CONFIG" <<'EOF'
+Host server1
+    HostName server1.example.com
+
+Host server2
+    HostName server2.example.com
+
+Host server3
+    HostName server3.example.com
+EOF
+
+cat > "$KNOWN_GOOD" <<'EOF'
+Host server1
+    HostName server1.example.com
+    LocalForward 127.0.0.1:5457 127.0.0.1:5457
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h:%p
+    ControlPersist 10m
+
+Host server2
+    HostName server2.example.com
+    LocalForward 127.0.0.1:5458 127.0.0.1:5457
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h:%p
+    ControlPersist 10m
+
+Host server3
+    HostName server3.example.com
+    LocalForward 127.0.0.1:5459 127.0.0.1:5457
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h:%p
+    ControlPersist 10m
+EOF
+
+python3 "$SCRIPT" server1 "127.0.0.1:5457 127.0.0.1:5457" --config "$TEST_CONFIG"
+python3 "$SCRIPT" server2 "127.0.0.1:5458 127.0.0.1:5457" --config "$TEST_CONFIG"
+python3 "$SCRIPT" server3 "127.0.0.1:5459 127.0.0.1:5457" --config "$TEST_CONFIG"
+
+if diff -u "$KNOWN_GOOD" "$TEST_CONFIG"; then
+    echo "✓ Test 8 passed"
+    test_passed=$((test_passed + 1))
+else
+    echo "✗ Test 8 failed"
+    test_failed=$((test_failed + 1))
+fi
+
+# Test 9: Replace multiple LocalForward lines with a single one
+echo ""
+echo "=== Test 9: Replace multiple LocalForward lines with single ==="
+cat > "$TEST_CONFIG" <<'EOF'
+Host multi
+    HostName multi.example.com
+    LocalForward 127.0.0.1:6000 127.0.0.1:6000
+    LocalForward 127.0.0.1:6001 127.0.0.1:6001
+EOF
+
+cat > "$KNOWN_GOOD" <<'EOF'
+Host multi
+    HostName multi.example.com
+    LocalForward 127.0.0.1:5457 127.0.0.1:5457
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h:%p
+    ControlPersist 10m
+EOF
+
+python3 "$SCRIPT" multi "127.0.0.1:5457 127.0.0.1:5457" --config "$TEST_CONFIG"
+
+if diff -u "$KNOWN_GOOD" "$TEST_CONFIG"; then
+    echo "✓ Test 9 passed"
+    test_passed=$((test_passed + 1))
+else
+    echo "✗ Test 9 failed"
+    test_failed=$((test_failed + 1))
+fi
+
+# Test 10: Reject pipe-separated multi-forward value
+echo ""
+echo "=== Test 10: Reject multi-forward value ==="
+cat > "$TEST_CONFIG" <<'EOF'
+Host single
+    HostName single.example.com
+EOF
+
+python3 "$SCRIPT" single "127.0.0.1:5457 127.0.0.1:5457|127.0.0.1:5458 127.0.0.1:5458" --config "$TEST_CONFIG" && STATUS=$? || STATUS=$?
+
+if [ $STATUS -ne 0 ]; then
+    echo "✓ Test 10 passed (multi-forward rejected)"
+    test_passed=$((test_passed + 1))
+else
+    echo "✗ Test 10 failed (multi-forward accepted, should reject)"
+    test_failed=$((test_failed + 1))
+fi
+
 # Summary
 echo ""
 echo "==================================="

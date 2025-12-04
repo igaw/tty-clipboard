@@ -16,6 +16,7 @@ Arguments:
 
 Options:
     -p, --port PORT      Local port for SSH LocalForward (default: auto-detect)
+    --bridge-ports LIST  Comma-separated port list for Wayland bridge (overrides auto-detect)
     -w, --wayland-bridge Install and configure Wayland clipboard bridge service
     -h, --help           Show this help message
 
@@ -32,12 +33,17 @@ Example:
     $0 myserver.example.com
     $0 myserver.example.com ./builddir
     $0 -p 5458 server2.com               # Use specific local port
-    $0 --port 5459 user@server3.com
     $0 -w myserver.example.com           # Also install Wayland bridge
 
 Note: By default, ports are auto-detected. If a host already has a LocalForward
       configured, that port is reused. Otherwise, the next available port starting
       from 5457 is assigned. Use -p to override and specify a custom port.
+      
+      For multi-server clipboard sync, run this script once for each server:
+        $0 -p 5457 server1.com
+        $0 -p 5458 server2.com
+        $0 -p 5459 server3.com
+      Then use: tty-cb-client -p 5457,5458,5459 read
 
 EOF
 }
@@ -50,12 +56,17 @@ if [[ $# -lt 1 ]]; then
 fi
 
 LOCAL_PORT=""
+BRIDGE_PORTS_OVERRIDE=""
 INSTALL_WAYLAND_BRIDGE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         -p|--port)
             LOCAL_PORT="$2"
+            shift 2
+            ;;
+        --bridge-ports)
+            BRIDGE_PORTS_OVERRIDE="$2"
             shift 2
             ;;
         -w|--wayland-bridge)
@@ -296,7 +307,19 @@ if [ "$INSTALL_WAYLAND_BRIDGE" = true ]; then
     # Create systemd user service for Wayland bridge
     mkdir -p "$HOME/.config/systemd/user"
     
-    cat > "$HOME/.config/systemd/user/tty-clipboard-bridge.service" << 'BRIDGEEOF'
+    # Discover all configured local ports from SSH config to enable multi-server bridge
+    # If user provided explicit list, use it; otherwise detect from SSH config
+    if [ -n "$BRIDGE_PORTS_OVERRIDE" ]; then
+        ALL_PORTS="$BRIDGE_PORTS_OVERRIDE"
+    else
+        ALL_PORTS=$(python3 "$SCRIPT_DIR/update-ssh-localforward.py" ignored --list-all-ports --config "$SSH_CONFIG" 2>/dev/null || true)
+    fi
+    if [ -z "$ALL_PORTS" ]; then
+        # Fallback to the single port provided/auto-detected
+        ALL_PORTS="$LOCAL_PORT"
+    fi
+
+    cat > "$HOME/.config/systemd/user/tty-clipboard-bridge.service" << BRIDGEEOF
 [Unit]
 Description=Wayland Clipboard Bridge for tty-clipboard
 Documentation=https://github.com/igaw/tty-clipboard
@@ -304,7 +327,7 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/wayland-bridge.sh localhost
+ExecStart=%h/.local/bin/wayland-bridge.sh localhost ${ALL_PORTS}
 ExecStop=%h/.local/bin/wayland-bridge.sh --stop
 Restart=on-failure
 RestartSec=5
@@ -313,6 +336,12 @@ Environment="WAYLAND_DISPLAY=wayland-0"
 [Install]
 WantedBy=default.target
 BRIDGEEOF
+    
+    if [ -n "$BRIDGE_PORTS_OVERRIDE" ]; then
+        echo "✓ Wayland bridge configured for overridden ports: ${ALL_PORTS}"
+    else
+        echo "✓ Wayland bridge configured for ports: ${ALL_PORTS}"
+    fi
     
     echo "✓ Systemd service created: tty-clipboard-bridge.service"
     

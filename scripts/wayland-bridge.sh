@@ -7,7 +7,7 @@ set -euo pipefail
 
 show_usage() {
     cat << EOF
-Usage: $0 [OPTIONS] [server_address]
+Usage: $0 [OPTIONS] [server_address] [ports]
 
 Bridge between Wayland clipboard (wl-clipboard) and tty-clipboard server.
 Runs two background processes:
@@ -16,6 +16,7 @@ Runs two background processes:
 
 Arguments:
     server_address    Address of tty-clipboard server (default: localhost)
+    ports             Comma-separated port list (default: 5457)
 
 Options:
     -h, --help       Show this help message
@@ -27,10 +28,15 @@ Requirements:
     - tty-cb-client
 
 Example:
-    $0                    # Start bridge with localhost
-    $0 localhost          # Explicit localhost
-    $0 192.168.1.100      # Bridge to remote server
-    $0 --stop             # Stop all bridge processes
+    $0                              # Start bridge with localhost:5457
+    $0 localhost 5457,5458,5459     # Monitor multiple ports
+    $0 localhost 5457               # Explicit single port
+    $0 192.168.1.100 5458           # Bridge to remote server
+    $0 --stop                       # Stop all bridge processes
+
+Multi-port usage:
+    When multiple ports are specified, the bridge monitors all ports for
+    clipboard updates and writes to all ports when the Wayland clipboard changes.
 
 EOF
 }
@@ -38,6 +44,7 @@ EOF
 VERBOSE=false
 STOP=false
 SERVER="localhost"
+PORTS="5457"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -60,7 +67,12 @@ while [[ $# -gt 0 ]]; do
             exit 1
             ;;
         *)
-            SERVER="$1"
+            if [ -z "${SERVER_SET:-}" ]; then
+                SERVER="$1"
+                SERVER_SET=1
+            else
+                PORTS="$1"
+            fi
             shift
             ;;
     esac
@@ -131,7 +143,7 @@ fi
 
 (
     while true; do
-        wl-paste -w tty-cb-client write "$SERVER" 2>/dev/null || sleep 1
+        wl-paste -w tty-cb-client -p "$PORTS" write "$SERVER" 2>/dev/null || sleep 1
     done
 ) &
 WAYLAND_TO_TTY_PID=$!
@@ -144,7 +156,7 @@ fi
 
 (
     while true; do
-        tty-cb-client read_blocked "$SERVER" 2>/dev/null | while IFS= read -r line; do
+        tty-cb-client -p "$PORTS" read_blocked "$SERVER" 2>/dev/null | while IFS= read -r line; do
             echo "$line" | wl-copy 2>/dev/null
         done
         sleep 1
@@ -158,6 +170,7 @@ if [ "$VERBOSE" = true ]; then
     echo "Wayland ↔ TTY Clipboard Bridge Started"
     echo "=========================================="
     echo "Server: $SERVER"
+    echo "Ports: $PORTS"
     echo "Wayland→TTY PID: $WAYLAND_TO_TTY_PID"
     echo "TTY→Wayland PID: $TTY_TO_WAYLAND_PID"
     echo ""

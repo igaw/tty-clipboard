@@ -126,6 +126,18 @@ test('no-self-echo',
   is_parallel: false,
 )
 
+test('multi-port',
+  find_program('test-multi-port.sh'),
+  args: [
+    cb_server.full_path(),
+    cb_client.full_path(),
+    meson.current_build_dir() / 'test-config',
+  ],
+  depends: [cert_files, cb_server, cb_client],
+  timeout: 60,
+  is_parallel: false,
+)
+
 test('update-ssh-localforward',
      find_program('bash'),
      args: [

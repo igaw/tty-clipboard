@@ -53,6 +53,22 @@ def detect_port_for_host(config_path, host):
     
     return (host, next_port)
 
+def list_all_ports(config_path):
+    """Return a sorted, de-duplicated list of all local ports used in LocalForward entries."""
+    if not config_path.exists():
+        return []
+
+    ports = set()
+    lines = config_path.read_text().splitlines()
+    for line in lines:
+        stripped = line.strip().lower()
+        if stripped.startswith("localforward"):
+            # Capture the local side port (first 127.0.0.1 occurrence)
+            m = re.search(r'127\.0\.0\.1[:\]](\d+)', line)
+            if m:
+                ports.add(int(m.group(1)))
+    return sorted(ports)
+
 def main():
     parser = argparse.ArgumentParser(
         description="Add or update LocalForward for a Host entry in SSH config"
@@ -74,11 +90,22 @@ def main():
         action="store_true",
         help="Detect and print the port to use for this host (existing or next available)"
     )
+    parser.add_argument(
+        "--list-all-ports",
+        action="store_true",
+        help="List all local ports from LocalForward entries across all hosts (comma-separated)"
+    )
     args = parser.parse_args()
 
     host = args.host
     config_path = args.config
     
+    # List all ports mode (host is ignored)
+    if args.list_all_ports:
+        ports = list_all_ports(config_path)
+        print(",".join(str(p) for p in ports))
+        return
+
     # Handle port detection mode
     if args.detect_port:
         detected_host, detected_port = detect_port_for_host(config_path, host)
@@ -90,6 +117,10 @@ def main():
         parser.error("localforward argument is required when not using --detect-port")
     
     forward_value = args.localforward
+    # Enforce single LocalForward per host
+    if '|' in forward_value:
+        print("Error: Only one LocalForward per host is supported. Run the tool once per host.", file=sys.stderr)
+        sys.exit(2)
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     if not config_path.exists():
@@ -124,34 +155,34 @@ def main():
                 host_block_lines.append(subline)
                 i += 1
 
-            # Check if LocalForward, ControlMaster, ControlPath, ControlPersist exist
-            lf_found = False
+            # Remove all existing LocalForward lines to ensure only one remains
+            host_block_lines = [line for line in host_block_lines
+                                if not line.strip().lower().startswith("localforward")]
+
+            # Check if ControlMaster, ControlPath, ControlPersist exist
             cm_found = False
             cp_found = False
             cpers_found = False
             
-            for idx, subline in enumerate(host_block_lines):
+            for subline in host_block_lines:
                 stripped_lower = subline.strip().lower()
-                if stripped_lower.startswith("localforward"):
-                    host_block_lines[idx] = indent + "LocalForward " + forward_value
-                    lf_found = True
-                elif stripped_lower.startswith("controlmaster"):
+                if stripped_lower.startswith("controlmaster"):
                     cm_found = True
                 elif stripped_lower.startswith("controlpath"):
                     cp_found = True
                 elif stripped_lower.startswith("controlpersist"):
                     cpers_found = True
 
-            # Insert missing options after last non-blank line
+            # Insert options after last non-blank line
             insert_idx = len(host_block_lines)
             for rev_idx in reversed(range(len(host_block_lines))):
                 if host_block_lines[rev_idx].strip() != "":
                     insert_idx = rev_idx + 1
                     break
             
+            # Add single LocalForward entry
             options_to_add = []
-            if not lf_found:
-                options_to_add.append(indent + "LocalForward " + forward_value)
+            options_to_add.append(indent + "LocalForward " + forward_value)
             if not cm_found:
                 options_to_add.append(indent + "ControlMaster auto")
             if not cp_found:
