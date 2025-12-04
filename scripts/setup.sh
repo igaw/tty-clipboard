@@ -438,6 +438,13 @@ BRIDGEEOF
     echo "  Stop:    systemctl --user stop tty-clipboard-bridge.service"
     echo "  Restart: systemctl --user restart tty-clipboard-bridge.service"
     echo ""
+    echo "Enable debug logging (to troubleshoot clipboard sync issues):"
+    echo "  1. Edit: ~/.config/systemd/user/tty-clipboard-bridge.service"
+    echo "  2. Change ExecStart line to: ExecStart=%h/.local/bin/wayland-bridge.sh -d localhost ${ALL_PORTS}"
+    echo "  3. Reload: systemctl --user daemon-reload"
+    echo "  4. Restart: systemctl --user restart tty-clipboard-bridge.service"
+    echo "  5. View logs: journalctl --user -u tty-clipboard-bridge.service -f"
+    echo ""
 fi
 
 echo "To use the clipboard:"

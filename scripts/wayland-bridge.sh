@@ -22,6 +22,7 @@ Options:
     -h, --help       Show this help message
     -s, --stop       Stop existing bridge processes
     -v, --verbose    Enable verbose output
+    -d, --debug      Enable debug logging (shows clipboard operations)
 
 Requirements:
     - wl-clipboard (wl-copy, wl-paste)
@@ -42,9 +43,17 @@ EOF
 }
 
 VERBOSE=false
+DEBUG=false
 STOP=false
 SERVER="localhost"
 PORTS="5457"
+
+# Debug logging function
+debug_log() {
+    if [ "$DEBUG" = true ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2
+    fi
+}
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -59,6 +68,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -v|--verbose)
             VERBOSE=true
+            shift
+            ;;
+        -d|--debug)
+            DEBUG=true
             shift
             ;;
         -*)
@@ -163,31 +176,67 @@ if [ "$VERBOSE" = true ]; then
     echo "Starting Wayland→TTY bridge..."
 fi
 
+debug_log "Starting Wayland→TTY bridge process"
+
 (
     while true; do
-        wl-paste -w tty-cb-client -p "$PORTS" write "$SERVER" 2>/dev/null || sleep 1
+        if [ "$DEBUG" = true ]; then
+            # With debug: show what's being copied
+            wl-paste -w bash -c '
+                content=$(cat)
+                echo "[$(date +"%Y-%m-%d %H:%M:%S")] Wayland clipboard changed, sending to tty-clipboard ('"$SERVER"':'"$PORTS"')" >&2
+                echo "[$(date +"%Y-%m-%d %H:%M:%S")] Content length: ${#content} bytes" >&2
+                if [ ${#content} -lt 200 ]; then
+                    echo "[$(date +"%Y-%m-%d %H:%M:%S")] Content preview: $content" >&2
+                fi
+                echo "$content" | tty-cb-client -p "'"$PORTS"'" write "'"$SERVER"'" 2>&1 | while read -r line; do
+                    echo "[$(date +"%Y-%m-%d %H:%M:%S")] tty-cb-client: $line" >&2
+                done
+            ' 2>&1 || sleep 1
+        else
+            # Without debug: normal operation
+            wl-paste -w tty-cb-client -p "$PORTS" write "$SERVER" 2>/dev/null || sleep 1
+        fi
     done
 ) &
 WAYLAND_TO_TTY_PID=$!
 echo $WAYLAND_TO_TTY_PID > "$PIDFILE_WAYLAND_TO_TTY"
+
+debug_log "Wayland→TTY bridge started with PID: $WAYLAND_TO_TTY_PID"
 
 # TTY → Wayland: Watch tty-clipboard and write to Wayland clipboard
 if [ "$VERBOSE" = true ]; then
     echo "Starting TTY→Wayland bridge..."
 fi
 
+debug_log "Starting TTY→Wayland bridge process"
+
 (
     while true; do
-        tty-cb-client -p "$PORTS" read_blocked "$SERVER" 2>/dev/null | while IFS= read -r line; do
-            echo "$line" | wl-copy 2>/dev/null
-        done
+        if [ "$DEBUG" = true ]; then
+            debug_log "Waiting for clipboard updates from tty-clipboard ($SERVER:$PORTS)..."
+            tty-cb-client -p "$PORTS" read_blocked "$SERVER" 2>&1 | while IFS= read -r line; do
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] Received from tty-clipboard: $line" >&2
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] Writing to Wayland clipboard..." >&2
+                echo "$line" | wl-copy 2>&1 | while read -r wl_line; do
+                    echo "[$(date +'%Y-%m-%d %H:%M:%S')] wl-copy: $wl_line" >&2
+                done
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] Written to Wayland clipboard" >&2
+            done
+        else
+            tty-cb-client -p "$PORTS" read_blocked "$SERVER" 2>/dev/null | while IFS= read -r line; do
+                echo "$line" | wl-copy 2>/dev/null
+            done
+        fi
         sleep 1
     done
 ) &
 TTY_TO_WAYLAND_PID=$!
 echo $TTY_TO_WAYLAND_PID > "$PIDFILE_TTY_TO_WAYLAND"
 
-if [ "$VERBOSE" = true ]; then
+debug_log "TTY→Wayland bridge started with PID: $TTY_TO_WAYLAND_PID"
+
+if [ "$VERBOSE" = true ] || [ "$DEBUG" = true ]; then
     echo "=========================================="
     echo "Wayland ↔ TTY Clipboard Bridge Started"
     echo "=========================================="
@@ -195,11 +244,18 @@ if [ "$VERBOSE" = true ]; then
     echo "Ports: $PORTS"
     echo "Wayland→TTY PID: $WAYLAND_TO_TTY_PID"
     echo "TTY→Wayland PID: $TTY_TO_WAYLAND_PID"
+    if [ "$DEBUG" = true ]; then
+        echo "Debug mode: ENABLED"
+        echo "Logs will show clipboard operations"
+    fi
     echo ""
     echo "To stop the bridge:"
     echo "    $0 --stop"
     echo ""
 fi
+
+debug_log "Bridge initialization complete"
+debug_log "Waiting for clipboard events..."
 
 # Cleanup handler
 trap 'kill $WAYLAND_TO_TTY_PID $TTY_TO_WAYLAND_PID 2>/dev/null; exit 0' INT TERM EXIT
