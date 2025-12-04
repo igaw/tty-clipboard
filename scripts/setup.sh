@@ -179,10 +179,27 @@ print_path_setup_instructions() {
 # Install client locally
 echo ""
 echo "Installing client locally..."
+
+# Stop the Wayland bridge service if it's running (to avoid "Text file busy" error)
+BRIDGE_SERVICE_WAS_RUNNING=false
+if systemctl --user is-active --quiet tty-clipboard-bridge.service 2>/dev/null; then
+    echo "Stopping tty-clipboard-bridge service..."
+    systemctl --user stop tty-clipboard-bridge.service 2>/dev/null || true
+    BRIDGE_SERVICE_WAS_RUNNING=true
+    # Give it a moment to fully stop
+    sleep 1
+fi
+
 mkdir -p "$HOME/.local/bin"
 cp "$CLIENT_BIN" "$HOME/.local/bin/tty-cb-client"
 chmod 755 "$HOME/.local/bin/tty-cb-client"
 echo "✓ Client installed to ~/.local/bin/tty-cb-client"
+
+# Restart the bridge service if it was running
+if [ "$BRIDGE_SERVICE_WAS_RUNNING" = true ]; then
+    echo "Restarting tty-clipboard-bridge service..."
+    systemctl --user start tty-clipboard-bridge.service 2>/dev/null || true
+fi
 
 # Check if ~/.local/bin is in PATH
 if ! check_local_bin_in_path; then
