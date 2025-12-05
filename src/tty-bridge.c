@@ -464,6 +464,8 @@ static int connect_to_server(bridge_ctx_t *ctx, const char *host, uint16_t port)
 					  port);
 				goto tls_setup;
 			}
+			LOG_DEBUG("Connection attempt failed with errno %d %s",
+				  errno, strerror(errno));
 			close(sock);
 			sock = -1;
 		}
