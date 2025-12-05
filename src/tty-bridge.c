@@ -1,4 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0-only */
+#include <sys/syscall.h>
+ /* SPDX-License-Identifier: GPL-2.0-only */
 /* Copyright (C) 2024 Daniel Wagner <wagi@monom.org> */
 
 #include "config.h"
@@ -42,10 +43,47 @@
 
 static FILE *tls_debug_file = NULL;
 static volatile sig_atomic_t terminate = 0;
+static pthread_mutex_t shutdown_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t shutdown_cond = PTHREAD_COND_INITIALIZER;
 
-// SIGUSR1 handler to interrupt blocking syscalls (does nothing)
-static void sigusr1_handler(int sig) {
+
+static void signal_handler(int sig)
+{
 	(void)sig;
+	pid_t tid = (pid_t)syscall(SYS_gettid);
+	LOG_DEBUG("TID %d: Signal %d caught, terminating...", tid, sig);
+	pthread_mutex_lock(&shutdown_mutex);
+	terminate = 1;
+	pthread_cond_broadcast(&shutdown_cond);
+	pthread_mutex_unlock(&shutdown_mutex);
+}
+
+// Main thread: install SIGINT/SIGTERM handler
+static int setup_main_signals(void)
+{
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = signal_handler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_RESTART;
+	if (sigaction(SIGINT, &sa, NULL) < 0 ||
+		sigaction(SIGTERM, &sa, NULL) < 0) {
+		perror("sigaction");
+		return -1;
+	}
+	return 0;
+}
+
+// Worker threads: install SIGUSR1 handler and block SIGINT/SIGTERM
+static int setup_worker_signals(void)
+{
+	// Block SIGINT and SIGTERM in this thread so only main thread receives them
+	sigset_t set;
+	sigemptyset(&set);
+	sigaddset(&set, SIGINT);
+	sigaddset(&set, SIGTERM);
+	pthread_sigmask(SIG_BLOCK, &set, NULL);
+	return 0;
 }
 
 /* TLS debug callback */
@@ -63,14 +101,30 @@ static void tls_debug(void *ctx, int level, const char *file, int line,
 static int ssl_send_callback(void *ctx, const unsigned char *buf, size_t len)
 {
 	int fd = (int)(intptr_t)ctx;
+	LOG_DEBUG("ssl_send_callback: called (fd=%d, len=%zu)", fd, len);
 	if (terminate) {
+		LOG_DEBUG("ssl_send_callback: terminate set, returning MBEDTLS_ERR_NET_CONN_RESET");
 		return MBEDTLS_ERR_NET_CONN_RESET;
 	}
 	ssize_t ret = send(fd, buf, len, 0);
 	if (ret < 0) {
+		LOG_DEBUG("ssl_send_callback: send() failed, ret=%zd, errno=%d (%s)", ret, errno, strerror(errno));
+		if (errno == EINTR) {
+			LOG_DEBUG("ssl_send_callback: send() interrupted by EINTR");
+			return MBEDTLS_ERR_NET_CONN_RESET;
+		}
 		if (errno == EAGAIN || errno == EWOULDBLOCK)
 			return MBEDTLS_ERR_SSL_WANT_WRITE;
+		if (errno == EPIPE) {
+			LOG_DEBUG("ssl_send_callback: send() failed with EPIPE (broken pipe)");
+		} else if (errno == ECONNRESET) {
+			LOG_DEBUG("ssl_send_callback: send() failed with ECONNRESET (connection reset)");
+		}
 		return MBEDTLS_ERR_NET_SEND_FAILED;
+	}
+	if (ret == 0) {
+		LOG_DEBUG("ssl_send_callback: send() returned 0 (peer closed connection)");
+		return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
 	}
 	return (int)ret;
 }
@@ -78,17 +132,29 @@ static int ssl_send_callback(void *ctx, const unsigned char *buf, size_t len)
 static int ssl_recv_callback(void *ctx, unsigned char *buf, size_t len)
 {
 	int fd = (int)(intptr_t)ctx;
+	LOG_DEBUG("ssl_recv_callback: called (fd=%d, len=%zu)", fd, len);
 	if (terminate) {
+		LOG_DEBUG("ssl_recv_callback: terminate set, returning MBEDTLS_ERR_NET_CONN_RESET");
 		return MBEDTLS_ERR_NET_CONN_RESET;
 	}
 	ssize_t ret = recv(fd, buf, len, 0);
 	if (ret < 0) {
+		LOG_DEBUG("ssl_recv_callback: recv() failed, ret=%zd, errno=%d (%s)", ret, errno, strerror(errno));
+		if (errno == EINTR) {
+			LOG_DEBUG("ssl_recv_callback: recv() interrupted by EINTR");
+			return MBEDTLS_ERR_NET_CONN_RESET;
+		}
 		if (errno == EAGAIN || errno == EWOULDBLOCK)
 			return MBEDTLS_ERR_SSL_WANT_READ;
+		if (errno == ECONNRESET) {
+			LOG_DEBUG("ssl_recv_callback: recv() failed with ECONNRESET (connection reset)");
+		}
 		return MBEDTLS_ERR_NET_RECV_FAILED;
 	}
-	if (ret == 0)
+	if (ret == 0) {
+		LOG_DEBUG("ssl_recv_callback: recv() returned 0 (peer closed connection)");
 		return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
+	}
 	return (int)ret;
 }
 
@@ -131,39 +197,6 @@ typedef struct {
 	const char *tls_debug_log;
 } bridge_server_ctx_t;
 
-
-
-static void signal_handler(int sig)
-{
-	(void)sig;
-	terminate = 1;
-}
-
-static int setup_signals(void)
-{
-	struct sigaction sa;
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = signal_handler;
-	sigemptyset(&sa.sa_mask);
-	sa.sa_flags = SA_RESTART;
-
-	if (sigaction(SIGINT, &sa, NULL) < 0 ||
-	    sigaction(SIGTERM, &sa, NULL) < 0) {
-		perror("sigaction");
-		return -1;
-	}
-	// Install SIGUSR1 handler for thread interruption
-	struct sigaction sa_usr1;
-	memset(&sa_usr1, 0, sizeof(sa_usr1));
-	sa_usr1.sa_handler = sigusr1_handler;
-	sigemptyset(&sa_usr1.sa_mask);
-	sa_usr1.sa_flags = 0;
-	if (sigaction(SIGUSR1, &sa_usr1, NULL) < 0) {
-		perror("sigaction SIGUSR1");
-		return -1;
-	}
-	return 0;
-}
 
 /**
  * Stub getaddrinfo for static builds
@@ -822,14 +855,9 @@ static void usage(const char *prog)
 // Thread function for each server connection
 
 static void *server_thread_func(void *arg) {
-	bridge_server_ctx_t *ctx = (bridge_server_ctx_t *)arg;
 
-	// Block SIGINT and SIGTERM in this thread so only main thread receives them
-	sigset_t set;
-	sigemptyset(&set);
-	sigaddset(&set, SIGINT);
-	sigaddset(&set, SIGTERM);
-	pthread_sigmask(SIG_BLOCK, &set, NULL);
+	bridge_server_ctx_t *ctx = (bridge_server_ctx_t *)arg;
+	setup_worker_signals();
 
 	while (!*(ctx->terminate)) {
 		// Connect to server (creates socket, TLS, handshake, subscribe)
@@ -878,8 +906,8 @@ static void *server_thread_func(void *arg) {
 
 int main(int argc, char **argv)
 {
-	// Install signal handlers for clean shutdown
-	if (setup_signals() < 0) {
+	// Install signal handlers for clean shutdown (main thread)
+	if (setup_main_signals() < 0) {
 		LOG_ERROR("Failed to set up signal handlers");
 		return 1;
 	}
@@ -1030,9 +1058,28 @@ int main(int argc, char **argv)
 		pthread_create(&server_threads[i], NULL, server_thread_func, &server_ctxs[i]);
 	}
 
-	// Send SIGUSR1 to all server threads to interrupt blocking syscalls
+
+
+	// Wait for shutdown (terminate set by signal handler)
+	pthread_mutex_lock(&shutdown_mutex);
+	while (!terminate) {
+		pthread_cond_wait(&shutdown_cond, &shutdown_mutex);
+	}
+	pthread_mutex_unlock(&shutdown_mutex);
+
+
+
+
+	// Use shutdown() to unblock recv() in other threads, then close()
 	for (int i = 0; i < num_servers; ++i) {
-		pthread_kill(server_threads[i], SIGUSR1);
+		if (server_ctxs[i].ssl_ctx && server_ctxs[i].ssl_ctx->sock_fd >= 0) {
+			int fd = server_ctxs[i].ssl_ctx->sock_fd;
+			LOG_DEBUG("main: shutdown(SHUT_RDWR) socket fd %d for server thread %d", fd, i);
+			shutdown(fd, SHUT_RDWR);
+			LOG_DEBUG("main: closing socket fd %d for server thread %d", fd, i);
+			close(fd);
+			server_ctxs[i].ssl_ctx->sock_fd = -1;
+		}
 	}
 
 	// Main thread waits for all server threads
