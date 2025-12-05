@@ -35,24 +35,24 @@ static void generate_local_clipboard_data(mock_plugin_ctx_t *ctx)
 {
 	if (!ctx)
 		return;
-	
+
 	/* Free previous data */
 	if (ctx->data) {
 		free(ctx->data);
 		ctx->data = NULL;
 		ctx->size = 0;
 	}
-	
+
 	/* Increment change counter and generate new data */
 	ctx->local_change_count++;
-	
+
 	/* Generate data: "local_clipboard_change_<timestamp>_#<count>" */
 	char buffer[256];
 	time_t now = time(NULL);
-	int written = snprintf(buffer, sizeof(buffer), 
-			"local_clipboard_change_%ld_#%d",
-			now, ctx->local_change_count);
-	
+	int written = snprintf(buffer, sizeof(buffer),
+			       "local_clipboard_change_%ld_#%d", now,
+			       ctx->local_change_count);
+
 	if (written > 0 && written < (int)sizeof(buffer)) {
 		ctx->size = (size_t)written;
 		ctx->data = malloc(ctx->size);
@@ -81,34 +81,34 @@ static plugin_handle_t mock_init(void)
 	mock_plugin_ctx_t *ctx = malloc(sizeof(mock_plugin_ctx_t));
 	if (!ctx)
 		return NULL;
-	
+
 	ctx->data = NULL;
 	ctx->size = 0;
 	ctx->local_change_pending = 0;
 	ctx->local_change_count = 0;
 	memset(&ctx->metadata, 0, sizeof(ctx->metadata));
-	
+
 	mock_data = ctx;
-	
+
 	/* Setup signal handler for local clipboard changes */
 	signal(SIGUSR1, signal_local_change);
-	
+
 	return ctx;
 }
 
-static clipboard_data_t* mock_read(plugin_handle_t handle)
+static clipboard_data_t *mock_read(plugin_handle_t handle)
 {
 	mock_plugin_ctx_t *ctx = (mock_plugin_ctx_t *)handle;
 	if (!ctx || !ctx->data || ctx->size == 0)
 		return NULL;
-	
+
 	clipboard_data_t *cdata = allocate_clipboard_data(ctx->size);
 	if (!cdata)
 		return NULL;
-	
+
 	memcpy(cdata->data, ctx->data, ctx->size);
 	memcpy(&cdata->metadata, &ctx->metadata, sizeof(clipboard_metadata_t));
-	
+
 	return cdata;
 }
 
@@ -117,28 +117,29 @@ static int mock_write(plugin_handle_t handle, const clipboard_data_t *data)
 	mock_plugin_ctx_t *ctx = (mock_plugin_ctx_t *)handle;
 	if (!ctx || !data)
 		return -1;
-	
+
 	/* Free previous data */
 	if (ctx->data) {
 		free(ctx->data);
 		ctx->data = NULL;
 		ctx->size = 0;
 	}
-	
+
 	/* Store new data */
 	if (data->size > 0) {
 		ctx->data = malloc(data->size);
 		if (!ctx->data)
 			return -1;
-		
+
 		memcpy(ctx->data, data->data, data->size);
 		ctx->size = data->size;
-		memcpy(&ctx->metadata, &data->metadata, sizeof(clipboard_metadata_t));
+		memcpy(&ctx->metadata, &data->metadata,
+		       sizeof(clipboard_metadata_t));
 	}
-	
+
 	/* Clear pending change flag when bridge writes to local clipboard */
 	ctx->local_change_pending = 0;
-	
+
 	return 0;
 }
 
