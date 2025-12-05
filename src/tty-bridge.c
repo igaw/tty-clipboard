@@ -197,9 +197,10 @@ static int tls_config_init(bridge_tls_config_t *tls_cfg)
 	mbedtls_x509_crt_init(&tls_cfg->clicert);
 	mbedtls_pk_init(&tls_cfg->pkey);
 
-	/* Seed RNG */
+	/* Seed RNG with personalization string to match client */
+	const char *pers = "tty_clipboard_client";
 	ret = mbedtls_ctr_drbg_seed(&tls_cfg->ctr_drbg, mbedtls_entropy_func,
-				    &tls_cfg->entropy, NULL, 0);
+			    &tls_cfg->entropy, (const unsigned char *)pers, strlen(pers));
 	if (ret) {
 		LOG_ERROR("mbedtls_ctr_drbg_seed failed: -0x%04x", -ret);
 		return -1;
@@ -338,15 +339,17 @@ static bridge_ssl_ctx_t *ssl_context_create(bridge_tls_config_t *tls_cfg,
 		return NULL;
 	}
 
+
 #ifdef MBEDTLS_3X
-	// Set hostname for SNI and certificate verification
+	// mbedTLS 3.x requires setting hostname, matching the CN in our certificates
 	ret = mbedtls_ssl_set_hostname(&ssl_ctx->ssl, "tty-clipboard-server");
-	if (ret) {
+	if (ret != 0) {
 		LOG_ERROR("mbedtls_ssl_set_hostname failed: -0x%04x", -ret);
 		mbedtls_ssl_free(&ssl_ctx->ssl);
 		free(ssl_ctx);
 		return NULL;
 	}
+	LOG_DEBUG("Hostname set to 'tty-clipboard-server' for certificate verification");
 #endif
 
 	return ssl_ctx;
@@ -534,18 +537,20 @@ tls_setup:
 
 	/* Set the socket for the SSL session using custom callbacks */
 	mbedtls_ssl_set_bio(&ctx->ssl_ctx->ssl, (void *)(intptr_t)sock,
-			    ssl_send_callback, ssl_recv_callback, NULL);
+				ssl_send_callback, ssl_recv_callback, NULL);
 
-	/* Perform SSL handshake */
-	ret = mbedtls_ssl_handshake(&ctx->ssl_ctx->ssl);
-	if (ret) {
-		LOG_ERROR("SSL handshake to %s:%u failed: -0x%04x", host, port,
-			  -ret);
-		ssl_context_free(ctx->ssl_ctx);
-		ctx->ssl_ctx = NULL;
-		return -1;
+	/* Perform SSL handshake (loop for WANT_READ/WANT_WRITE) */
+	LOG_DEBUG("Performing SSL handshake");
+	while ((ret = mbedtls_ssl_handshake(&ctx->ssl_ctx->ssl)) != 0) {
+		if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+			LOG_ERROR("SSL handshake to %s:%u failed: -0x%04x", host, port, -ret);
+			ssl_context_free(ctx->ssl_ctx);
+			ctx->ssl_ctx = NULL;
+			return -1;
+		}
 	}
 
+	LOG_INFO("Connected to server");
 	LOG_INFO("Connected to server");
 
 	/* Generate a random client_id using the DRBG, as in tty-client */
