@@ -96,26 +96,28 @@ typedef struct {
 	int sock_fd;
 } bridge_ssl_ctx_t;
 
+
 /* Server endpoint configuration */
 typedef struct {
 	char host[256];
 	uint16_t port;
 } server_endpoint_t;
 
-/* Bridge context */
+
+/* Per-server thread context */
 typedef struct {
 	const plugin_interface_t *plugin;
 	plugin_handle_t plugin_handle;
-	server_endpoint_t servers[2]; /* [0] = primary, [1] = secondary */
-	int num_servers;
+	server_endpoint_t server;
 	char local_hostname[256];
-	bridge_tls_config_t tls_config;
-	bridge_ssl_ctx_t *ssl_ctx; /* Current connection */
-	clipboard_data_t
-		*last_local_data; /* Last data read from local clipboard */
-	clipboard_data_t *last_remote_data; /* Last data from remote server */
+	bridge_tls_config_t *tls_config; // shared
+	bridge_ssl_ctx_t *ssl_ctx; // per-connection
+	clipboard_data_t *last_local_data;
+	clipboard_data_t *last_remote_data;
 	pthread_mutex_t data_mutex;
-} bridge_ctx_t;
+	volatile sig_atomic_t *terminate;
+	const char *tls_debug_log;
+} bridge_server_ctx_t;
 
 static volatile sig_atomic_t terminate = 0;
 
@@ -442,7 +444,7 @@ static Ttycb__Envelope *receive_protobuf_message(mbedtls_ssl_context *ssl)
  * Connect to clipboard server
  * [Force rebuild: 2025-12-05]
  */
-static int connect_to_server(bridge_ctx_t *ctx, const char *host, uint16_t port)
+static int connect_to_server(bridge_server_ctx_t *ctx, const char *host, uint16_t port)
 {
 	int ret;
 
@@ -528,7 +530,7 @@ tls_setup:
 	}
 
 	/* Create a fresh SSL context for this connection */
-	ctx->ssl_ctx = ssl_context_create(&ctx->tls_config, sock);
+	ctx->ssl_ctx = ssl_context_create(ctx->tls_config, sock);
 	if (!ctx->ssl_ctx) {
 		LOG_ERROR("Failed to create SSL context");
 		close(sock);
@@ -555,7 +557,7 @@ tls_setup:
 
 	/* Generate a random client_id using the DRBG, as in tty-client */
 	uint64_t client_id = 0;
-	if (mbedtls_ctr_drbg_random(&ctx->tls_config.ctr_drbg,
+	if (mbedtls_ctr_drbg_random(&ctx->tls_config->ctr_drbg,
 				    (unsigned char *)&client_id,
 				    sizeof(client_id)) != 0) {
 		LOG_ERROR("Failed to generate client_id");
@@ -588,7 +590,7 @@ tls_setup:
 /**
  * Send clipboard data to server
  */
-static int send_to_server(bridge_ctx_t *ctx, const clipboard_data_t *data)
+static int send_to_server(bridge_server_ctx_t *ctx, const clipboard_data_t *data)
 {
 	Ttycb__WriteRequest write = TTYCB__WRITE_REQUEST__INIT;
 	Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
@@ -611,7 +613,7 @@ static int send_to_server(bridge_ctx_t *ctx, const clipboard_data_t *data)
 /**
  * Receive clipboard data from server
  */
-static int receive_from_server(bridge_ctx_t *ctx, clipboard_data_t **out_data)
+static int receive_from_server(bridge_server_ctx_t *ctx, clipboard_data_t **out_data)
 {
 	Ttycb__Envelope *env = receive_protobuf_message(&ctx->ssl_ctx->ssl);
 	if (!env)
@@ -685,7 +687,7 @@ static int clipboard_data_equal(const clipboard_data_t *a,
  */
 static void *local_to_server_thread(void *arg)
 {
-	bridge_ctx_t *ctx = (bridge_ctx_t *)arg;
+	bridge_server_ctx_t *ctx = (bridge_server_ctx_t *)arg;
 
 	LOG_INFO("Starting local->server thread");
 
@@ -730,7 +732,7 @@ static void *local_to_server_thread(void *arg)
  */
 static void *server_to_local_thread(void *arg)
 {
-	bridge_ctx_t *ctx = (bridge_ctx_t *)arg;
+	bridge_server_ctx_t *ctx = (bridge_server_ctx_t *)arg;
 
 	LOG_INFO("Starting server->local thread");
 
@@ -795,71 +797,110 @@ static void usage(const char *prog)
 	fprintf(stderr, "  -h, --help              Show this help\n");
 }
 
-int main(int argc, char *argv[])
+
+// Thread function for each server connection
+
+static void *server_thread_func(void *arg) {
+	bridge_server_ctx_t *ctx = (bridge_server_ctx_t *)arg;
+	while (!*(ctx->terminate)) {
+		// Connect to server (creates socket, TLS, handshake, subscribe)
+		if (connect_to_server(ctx, ctx->server.host, ctx->server.port) != 0) {
+			LOG_ERROR("[thread] Failed to connect to %s:%u, retrying...", ctx->server.host, ctx->server.port);
+			sleep(2);
+			continue;
+		}
+
+		// Start protocol threads (local->server, server->local)
+		pthread_t l2s_thread, s2l_thread;
+		if (pthread_create(&l2s_thread, NULL, local_to_server_thread, ctx) < 0) {
+			LOG_ERROR("[thread] Failed to create local->server thread");
+			ssl_context_free(ctx->ssl_ctx);
+			ctx->ssl_ctx = NULL;
+			sleep(2);
+			continue;
+		}
+		if (pthread_create(&s2l_thread, NULL, server_to_local_thread, ctx) < 0) {
+			LOG_ERROR("[thread] Failed to create server->local thread");
+			*(ctx->terminate) = 1;
+			pthread_join(l2s_thread, NULL);
+			ssl_context_free(ctx->ssl_ctx);
+			ctx->ssl_ctx = NULL;
+			sleep(2);
+			continue;
+		}
+
+		pthread_join(l2s_thread, NULL);
+		pthread_join(s2l_thread, NULL);
+
+		// Clean up connection
+		if (ctx->ssl_ctx) {
+			ssl_context_free(ctx->ssl_ctx);
+			ctx->ssl_ctx = NULL;
+		}
+		// If not terminating, reconnect after delay
+		if (!*(ctx->terminate)) {
+			LOG_INFO("[thread] Disconnected, will attempt reconnect");
+			sleep(2);
+		}
+	}
+	return NULL;
+}
+
+
+int main(int argc, char **argv)
 {
-	bridge_ctx_t ctx;
-	memset(&ctx, 0, sizeof(ctx));
-	pthread_mutex_init(&ctx.data_mutex, NULL);
-
-	char *plugin_name = NULL;
+	// Install signal handlers for clean shutdown
+	if (setup_signals() < 0) {
+		LOG_ERROR("Failed to set up signal handlers");
+		return 1;
+	}
+	// CLI/config parsing
+	const char *plugin_name = NULL;
 	const char *tls_debug_log = NULL;
+	server_endpoint_t servers[2];
+	int num_servers = 0;
+	char local_hostname[256] = {0};
+	const plugin_interface_t *plugin = NULL;
+	plugin_handle_t plugin_handle = NULL;
 
-	/* Parse arguments */
 	struct option long_opts[] = { { "plugin", required_argument, 0, 'p' },
-				      { "server", required_argument, 0, 's' },
-				      { "verbose", no_argument, 0, 'v' },
-				      { "debug", no_argument, 0, 'd' },
-				      { "help", no_argument, 0, 'h' },
-				      { "tls-debug-log", required_argument, 0,
-					1 },
-				      { 0, 0, 0, 0 } };
-
+								  { "server", required_argument, 0, 's' },
+								  { "verbose", no_argument, 0, 'v' },
+								  { "debug", no_argument, 0, 'd' },
+								  { "help", no_argument, 0, 'h' },
+								  { "tls-debug-log", required_argument, 0, 1 },
+								  { 0, 0, 0, 0 } };
 	int opt;
-	while ((opt = getopt_long(argc, argv, "p:s:vdh", long_opts, NULL)) !=
-	       -1) {
+	while ((opt = getopt_long(argc, argv, "p:s:vdh", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 'p':
 			plugin_name = optarg;
 			break;
 		case 's': {
-			/* Parse comma-separated server endpoints: IP1:PORT1,IP2:PORT2 */
 			char *server_str = strdup(optarg);
 			if (!server_str) {
 				LOG_ERROR("Memory allocation failed");
 				return 1;
 			}
-
 			char *saveptr = NULL;
 			char *token = strtok_r(server_str, ",", &saveptr);
 			int server_idx = 0;
-
 			while (token && server_idx < 2) {
 				char host[256];
 				uint16_t port;
-
-				/* Parse IP:PORT */
-				if (sscanf(token, "%255[^:]:%hu", host,
-					   &port) != 2) {
-					LOG_ERROR(
-						"Invalid server format: %s (expected IP:PORT)",
-						token);
+				if (sscanf(token, "%255[^:]:%hu", host, &port) != 2) {
+					LOG_ERROR("Invalid server format: %s (expected IP:PORT)", token);
 					free(server_str);
 					return 1;
 				}
-
-				strncpy(ctx.servers[server_idx].host, host,
-					sizeof(ctx.servers[server_idx].host) -
-						1);
-				ctx.servers[server_idx].port = port;
+				strncpy(servers[server_idx].host, host, sizeof(servers[server_idx].host) - 1);
+				servers[server_idx].port = port;
 				server_idx++;
-
 				token = strtok_r(NULL, ",", &saveptr);
 			}
-
-			ctx.num_servers = server_idx;
+			num_servers = server_idx;
 			free(server_str);
-
-			if (ctx.num_servers == 0) {
+			if (num_servers == 0) {
 				LOG_ERROR("No valid servers specified");
 				return 1;
 			}
@@ -883,162 +924,83 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	/* Validate arguments */
-	if (!plugin_name || ctx.num_servers == 0) {
+	if (!plugin_name || num_servers == 0) {
 		LOG_ERROR("Missing required arguments");
 		usage(argv[0]);
 		return 1;
 	}
 
-	/* Select plugin from registry */
-	ctx.plugin = get_plugin_by_name(plugin_name);
-
-	if (!ctx.plugin) {
-		LOG_ERROR(
-			"Plugin '%s' not found. Available plugins: wayland, klipper, mock",
-			plugin_name);
+	plugin = get_plugin_by_name(plugin_name);
+	if (!plugin) {
+		LOG_ERROR("Plugin '%s' not found. Available plugins: wayland, klipper, mock", plugin_name);
 		return 1;
 	}
-
-	/* Initialize plugin */
-	ctx.plugin_handle = ctx.plugin->init();
-	if (!ctx.plugin_handle) {
+	plugin_handle = plugin->init();
+	if (!plugin_handle) {
 		LOG_ERROR("Failed to initialize %s plugin", plugin_name);
 		return 1;
 	}
+	LOG_INFO("Initialized %s plugin", plugin->name);
 
-	LOG_INFO("Initialized %s plugin", ctx.plugin->name);
-
-	/* Get local hostname */
-	if (gethostname(ctx.local_hostname, sizeof(ctx.local_hostname) - 1) <
-	    0) {
+	if (gethostname(local_hostname, sizeof(local_hostname) - 1) < 0) {
 		LOG_WARN("Failed to get hostname");
-		strcpy(ctx.local_hostname, "unknown");
+		strcpy(local_hostname, "unknown");
 	}
 
-	/* Open TLS debug file if debugging is enabled */
+	// Open TLS debug file if debugging is enabled
 	const char *dbg = getenv("MBEDTLS_DEBUG");
 	if (dbg && *dbg) {
 		const char *debug_filename;
 		char auto_filename[1024];
-
 		if (tls_debug_log) {
 			debug_filename = tls_debug_log;
 		} else {
 			snprintf(auto_filename, sizeof(auto_filename),
-				 "/tmp/tty-bridge-%s-%s-%u-tls-debug.log",
-				 ctx.local_hostname, ctx.servers[0].host,
-				 ctx.servers[0].port);
+					 "/tmp/tty-bridge-%s-%s-%u-tls-debug.log",
+					 local_hostname, servers[0].host, servers[0].port);
 			debug_filename = auto_filename;
 		}
-
 		tls_debug_file = fopen(debug_filename, "w");
 		if (tls_debug_file) {
-			fprintf(stderr,
-				"[BRIDGE] TLS debug output redirected to %s\n",
-				debug_filename);
+			fprintf(stderr, "[BRIDGE] TLS debug output redirected to %s\n", debug_filename);
 		} else {
-			fprintf(stderr,
-				"[BRIDGE] Warning: Failed to open TLS debug file: %s\n",
-				debug_filename);
+			fprintf(stderr, "[BRIDGE] Warning: Failed to open TLS debug file: %s\n", debug_filename);
 		}
 	}
 
-	/* Initialize TLS configuration */
-	if (tls_config_init(&ctx.tls_config) < 0) {
+	// Initialize TLS configuration (shared)
+	bridge_tls_config_t tls_config;
+	memset(&tls_config, 0, sizeof(tls_config));
+	if (tls_config_init(&tls_config) < 0) {
 		LOG_ERROR("Failed to initialize TLS configuration");
-		ctx.plugin->cleanup(ctx.plugin_handle);
 		return 1;
 	}
 
-	/* Connect to server(s) - try each server in order until one succeeds */
-	int connected = 0;
-	for (int i = 0; i < ctx.num_servers; i++) {
-		LOG_INFO("Attempting to connect to server %d/%d: %s:%u", i + 1,
-			 ctx.num_servers, ctx.servers[i].host,
-			 ctx.servers[i].port);
-
-		if (connect_to_server(&ctx, ctx.servers[i].host,
-				      ctx.servers[i].port) == 0) {
-			LOG_INFO("Successfully connected to server: %s:%u",
-				 ctx.servers[i].host, ctx.servers[i].port);
-			connected = 1;
-			break;
-		}
-
-		LOG_WARN(
-			"Failed to connect to server %s:%u, trying next server",
-			ctx.servers[i].host, ctx.servers[i].port);
+	// Prepare per-server thread contexts
+	pthread_t server_threads[2];
+	bridge_server_ctx_t server_ctxs[2];
+	for (int i = 0; i < num_servers; ++i) {
+		memset(&server_ctxs[i], 0, sizeof(bridge_server_ctx_t));
+		server_ctxs[i].plugin = plugin;
+		server_ctxs[i].plugin_handle = plugin_handle;
+		server_ctxs[i].server = servers[i];
+		strncpy(server_ctxs[i].local_hostname, local_hostname, sizeof(server_ctxs[i].local_hostname)-1);
+		server_ctxs[i].tls_config = &tls_config;
+		pthread_mutex_init(&server_ctxs[i].data_mutex, NULL);
+		server_ctxs[i].terminate = &terminate;
+		server_ctxs[i].tls_debug_log = tls_debug_log;
+		pthread_create(&server_threads[i], NULL, server_thread_func, &server_ctxs[i]);
 	}
 
-	if (!connected) {
-		LOG_ERROR("Failed to connect to any server");
-		tls_config_cleanup(&ctx.tls_config);
-		ctx.plugin->cleanup(ctx.plugin_handle);
-		return 1;
+	// Main thread waits for all server threads
+	for (int i = 0; i < num_servers; ++i) {
+		pthread_join(server_threads[i], NULL);
+		pthread_mutex_destroy(&server_ctxs[i].data_mutex);
 	}
 
-	/* Setup signal handlers */
-	if (setup_signals() < 0) {
-		LOG_ERROR("Failed to setup signal handlers");
-		if (ctx.ssl_ctx) {
-			ssl_context_free(ctx.ssl_ctx);
-		}
-		tls_config_cleanup(&ctx.tls_config);
-		ctx.plugin->cleanup(ctx.plugin_handle);
-		return 1;
-	}
-
-	/* Start bridge threads */
-	pthread_t l2s_thread, s2l_thread;
-	if (pthread_create(&l2s_thread, NULL, local_to_server_thread, &ctx) <
-	    0) {
-		LOG_ERROR("Failed to create local->server thread");
-		if (ctx.ssl_ctx) {
-			ssl_context_free(ctx.ssl_ctx);
-		}
-		tls_config_cleanup(&ctx.tls_config);
-		ctx.plugin->cleanup(ctx.plugin_handle);
-		return 1;
-	}
-
-	if (pthread_create(&s2l_thread, NULL, server_to_local_thread, &ctx) <
-	    0) {
-		LOG_ERROR("Failed to create server->local thread");
-		terminate = 1;
-		pthread_join(l2s_thread, NULL);
-		if (ctx.ssl_ctx) {
-			ssl_context_free(ctx.ssl_ctx);
-		}
-		tls_config_cleanup(&ctx.tls_config);
-		ctx.plugin->cleanup(ctx.plugin_handle);
-		return 1;
-	}
-
-	LOG_INFO("Bridge running, press Ctrl+C to stop");
-
-	/* Wait for threads */
-	pthread_join(l2s_thread, NULL);
-	pthread_join(s2l_thread, NULL);
-
-	/* Cleanup */
-	if (ctx.last_local_data)
-		ctx.plugin->free_clipboard_data(ctx.last_local_data);
-	if (ctx.last_remote_data)
-		ctx.plugin->free_clipboard_data(ctx.last_remote_data);
-
-	if (ctx.ssl_ctx) {
-		ssl_context_free(ctx.ssl_ctx);
-	}
-	tls_config_cleanup(&ctx.tls_config);
-	ctx.plugin->cleanup(ctx.plugin_handle);
-	pthread_mutex_destroy(&ctx.data_mutex);
-
-	/* Close TLS debug file if opened */
-	if (tls_debug_file) {
-		fclose(tls_debug_file);
-	}
-
-	LOG_INFO("Bridge stopped");
+	// Cleanup
+	tls_config_cleanup(&tls_config);
+	plugin->cleanup(plugin_handle);
+	if (tls_debug_file) fclose(tls_debug_file);
 	return 0;
 }
