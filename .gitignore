@@ -1,3 +1,5 @@
 subprojects/libprotobuf-c/
 subprojects/mbedtls/
 *.pyc
+compile_commands.json
+.cache
