@@ -114,7 +114,7 @@ static clipboard_data_t *mock_read(plugin_handle_t handle)
 	char uuid_buf[33];
 	for (int i = 0; i < 16; ++i) sprintf(&uuid_buf[i*2], "%02x", ctx->metadata.write_uuid[i]);
 	uuid_buf[32] = '\0';
-	LOG_INFO("[MOCK] Read %zu bytes, hostname: %s, ts: %ld, uuid: %s",
+	LOG_DEBUG("[MOCK] Read %zu bytes, hostname: %s, ts: %ld, uuid: %s",
 		ctx->size,
 		ctx->metadata.hostname[0] ? ctx->metadata.hostname : "unknown",
 		(long)ctx->metadata.timestamp,
@@ -152,7 +152,7 @@ static int mock_write(plugin_handle_t handle, const clipboard_data_t *data)
 	char uuid_buf[33];
 	for (int i = 0; i < 16; ++i) sprintf(&uuid_buf[i*2], "%02x", data->metadata.write_uuid[i]);
 	uuid_buf[32] = '\0';
-	LOG_INFO("[MOCK] Write %zu bytes, hostname: %s, ts: %ld, uuid: %s",
+	LOG_DEBUG("[MOCK] Write %zu bytes, hostname: %s, ts: %ld, uuid: %s",
 		data->size,
 		data->metadata.hostname[0] ? data->metadata.hostname : "unknown",
 		(long)data->metadata.timestamp,

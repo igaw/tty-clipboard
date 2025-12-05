@@ -215,7 +215,8 @@ typedef struct {
 	server_endpoint_t server;
 	char local_hostname[256];
 	bridge_tls_config_t *tls_config; // shared
-	bridge_ssl_ctx_t *ssl_ctx; // per-connection
+	bridge_ssl_ctx_t *read_ssl_ctx; // for reading/subscribing
+	bridge_ssl_ctx_t *write_ssl_ctx; // for writing
 	clipboard_data_t *last_local_data;
 	clipboard_data_t *last_remote_data;
 	pthread_mutex_t data_mutex;
@@ -597,27 +598,25 @@ tls_setup:
 
 	LOG_DEBUG("TCP connection established");
 
-	/* Create a fresh SSL context for this connection */
-	ctx->ssl_ctx = ssl_context_create(ctx->tls_config, sock);
-	if (!ctx->ssl_ctx) {
-		LOG_ERROR("Failed to create SSL context");
+	/* Create a fresh SSL context for this connection (for reading) */
+	ctx->read_ssl_ctx = ssl_context_create(ctx->tls_config, sock);
+	if (!ctx->read_ssl_ctx) {
+		LOG_ERROR("Failed to create read SSL context");
 		close(sock);
 		return -1;
 	}
-
-	/* Set the socket for the SSL session using custom callbacks */
-	mbedtls_ssl_set_bio(&ctx->ssl_ctx->ssl, (void *)(intptr_t)sock,
-			    ssl_send_callback, ssl_recv_callback, NULL);
+	mbedtls_ssl_set_bio(&ctx->read_ssl_ctx->ssl, (void *)(intptr_t)sock,
+						ssl_send_callback, ssl_recv_callback, NULL);
 
 	/* Perform SSL handshake (loop for WANT_READ/WANT_WRITE, check terminate) */
 	LOG_DEBUG("Performing SSL handshake");
-	while ((ret = mbedtls_ssl_handshake(&ctx->ssl_ctx->ssl)) != 0) {
+	while ((ret = mbedtls_ssl_handshake(&ctx->read_ssl_ctx->ssl)) != 0) {
 		if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
 		    ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
 			if (*(ctx->terminate)) {
 				LOG_INFO("Handshake interrupted by shutdown");
-				ssl_context_free(ctx->ssl_ctx);
-				ctx->ssl_ctx = NULL;
+				ssl_context_free(ctx->read_ssl_ctx);
+				ctx->read_ssl_ctx = NULL;
 				return -1;
 			}
 			usleep(10000); // 10ms sleep to avoid busy loop
@@ -625,8 +624,8 @@ tls_setup:
 		}
 		LOG_ERROR("SSL handshake to %s:%u failed: -0x%04x", host, port,
 			  -ret);
-		ssl_context_free(ctx->ssl_ctx);
-		ctx->ssl_ctx = NULL;
+		ssl_context_free(ctx->read_ssl_ctx);
+		ctx->read_ssl_ctx = NULL;
 		return -1;
 	}
 
@@ -639,8 +638,8 @@ tls_setup:
 				    (unsigned char *)&client_id,
 				    sizeof(client_id)) != 0) {
 		LOG_ERROR("Failed to generate client_id");
-		ssl_context_free(ctx->ssl_ctx);
-		ctx->ssl_ctx = NULL;
+		ssl_context_free(ctx->read_ssl_ctx);
+		ctx->read_ssl_ctx = NULL;
 		return -1;
 	}
 	if (client_id == 0)
@@ -654,10 +653,10 @@ tls_setup:
 	env.body_case = TTYCB__ENVELOPE__BODY_SUBSCRIBE;
 	env.subscribe = &sub;
 
-	if (send_protobuf_message(&ctx->ssl_ctx->ssl, &env.base) < 0) {
+	if (send_protobuf_message(&ctx->read_ssl_ctx->ssl, &env.base) < 0) {
 		LOG_ERROR("Failed to send initial SUBSCRIBE request");
-		ssl_context_free(ctx->ssl_ctx);
-		ctx->ssl_ctx = NULL;
+		ssl_context_free(ctx->read_ssl_ctx);
+		ctx->read_ssl_ctx = NULL;
 		return -1;
 	}
 
@@ -687,7 +686,54 @@ static int send_to_server(bridge_server_ctx_t *ctx,
 	env.body_case = TTYCB__ENVELOPE__BODY_WRITE;
 	env.write = &write;
 
-	return send_protobuf_message(&ctx->ssl_ctx->ssl, &env.base);
+	if (!ctx->write_ssl_ctx) {
+		// Create a new socket/SSL context for writing if not already present
+		int sock = -1;
+		struct sockaddr_in server_address;
+		memset(&server_address, 0, sizeof(server_address));
+		server_address.sin_family = AF_INET;
+		server_address.sin_port = htons(ctx->server.port);
+		if (inet_pton(AF_INET, ctx->server.host, &server_address.sin_addr) > 0) {
+			sock = socket(AF_INET, SOCK_STREAM, 0);
+			if (sock >= 0 && connect(sock, (struct sockaddr *)&server_address, sizeof(server_address)) == 0) {
+				ctx->write_ssl_ctx = ssl_context_create(ctx->tls_config, sock);
+				if (!ctx->write_ssl_ctx) {
+					LOG_ERROR("Failed to create write SSL context");
+					close(sock);
+					return -1;
+				}
+				mbedtls_ssl_set_bio(&ctx->write_ssl_ctx->ssl, (void *)(intptr_t)sock, ssl_send_callback, ssl_recv_callback, NULL);
+				// Perform SSL handshake
+				int ret;
+				while ((ret = mbedtls_ssl_handshake(&ctx->write_ssl_ctx->ssl)) != 0) {
+					if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+						if (*(ctx->terminate)) {
+							LOG_INFO("Handshake interrupted by shutdown");
+							ssl_context_free(ctx->write_ssl_ctx);
+							ctx->write_ssl_ctx = NULL;
+							return -1;
+						}
+						usleep(10000);
+						continue;
+					}
+					LOG_ERROR("SSL handshake (write) to %s:%u failed: -0x%04x", ctx->server.host, ctx->server.port, -ret);
+					ssl_context_free(ctx->write_ssl_ctx);
+					ctx->write_ssl_ctx = NULL;
+					close(sock);
+					return -1;
+				}
+			} else {
+				LOG_ERROR("Failed to connect write socket to %s:%u", ctx->server.host, ctx->server.port);
+				if (sock >= 0) close(sock);
+				return -1;
+			}
+		} else {
+			LOG_ERROR("inet_pton failed for write socket to %s", ctx->server.host);
+			return -1;
+		}
+	}
+    LOG_INFO("send_to_server: sending protobuf message to %s:%u", ctx->server.host, ctx->server.port);
+	return send_protobuf_message(&ctx->write_ssl_ctx->ssl, &env.base);
 }
 
 /**
@@ -696,7 +742,7 @@ static int send_to_server(bridge_server_ctx_t *ctx,
 static int receive_from_server(bridge_server_ctx_t *ctx,
 			       clipboard_data_t **out_data)
 {
-	Ttycb__Envelope *env = receive_protobuf_message(&ctx->ssl_ctx->ssl);
+	Ttycb__Envelope *env = receive_protobuf_message(&ctx->read_ssl_ctx->ssl);
 	if (!env)
 		return -1;
 
@@ -770,59 +816,57 @@ static void *local_to_server_thread(void *arg)
 {
 	bridge_server_ctx_t *ctx = (bridge_server_ctx_t *)arg;
 
-	LOG_INFO("Starting local->server thread");
+	LOG_INFO("Starting local->server thread for server %s:%u (local host: %s)", ctx->server.host, ctx->server.port, ctx->local_hostname);
 
 	while (!terminate) {
+
 		clipboard_data_t *data = ctx->plugin->read(ctx->plugin_handle);
 		if (!data) {
 			sleep(1);
 			continue;
 		}
+		LOG_INFO("local_to_server_thread (%s:%u): Clipboard event detected, size=%zu, hostname=%s, uuid=%s", ctx->server.host, ctx->server.port, data->size, data->metadata.hostname ? data->metadata.hostname : "unknown", uuid_to_hex(data->metadata.write_uuid));
 
 		pthread_mutex_lock(&ctx->data_mutex);
 
-		/* Check if this is the same data we just received from server */
-		if (!clipboard_data_equal(data, ctx->last_remote_data)) {
+		/* Check if this is the same data we just received from any server */
+		int is_remote = 0;
+		for (int i = 0; i < num_servers; ++i) {
+			bridge_server_ctx_t *src_ctx = &server_ctxs[i];
+			if (clipboard_data_equal(data, src_ctx->last_remote_data)) {
+				is_remote = 1;
+				break;
+			}
+		}
+		if (!is_remote) {
 			/* New data from local clipboard, forward to all other servers */
 			for (int i = 0; i < num_servers; ++i) {
 				bridge_server_ctx_t *dest_ctx = &server_ctxs[i];
-				if (dest_ctx == ctx)
-					continue; // Don't send back to source
-				LOG_INFO(
-					"Forwarding %zu bytes from %s (uuid: %s) to server %s:%u (local host: %s)",
+				// Only forward to servers that are not the local clipboard source
+				if (dest_ctx == ctx) {
+					LOG_DEBUG("Skipping forwarding to own server context %s:%u", dest_ctx->server.host, dest_ctx->server.port);
+					continue;
+				}
+				LOG_INFO("Forwarding clipboard data (size=%zu, uuid=%s) from local to server %s:%u (local host: %s)",
 					data->size,
-					data->metadata.hostname ?
-						data->metadata.hostname :
-						"unknown",
 					uuid_to_hex(data->metadata.write_uuid),
 					dest_ctx->server.host,
 					dest_ctx->server.port,
 					dest_ctx->local_hostname);
-				int send_result =
-					send_to_server(dest_ctx, data);
+				int send_result = send_to_server(dest_ctx, data);
 				if (send_result < 0) {
-					LOG_ERROR(
-						"Failed to forward to server %s:%u (hostname: %s, uuid: %s)",
+					LOG_ERROR("Failed to forward to server %s:%u (hostname: %s, uuid: %s)",
 						dest_ctx->server.host,
 						dest_ctx->server.port,
-						data->metadata.hostname ?
-							data->metadata.hostname :
-							"unknown",
-						uuid_to_hex(
-							data->metadata
-								.write_uuid));
+						data->metadata.hostname ? data->metadata.hostname : "unknown",
+						uuid_to_hex(data->metadata.write_uuid));
 				} else {
-					LOG_DEBUG(
-						"Successfully forwarded %zu bytes to server %s:%u (hostname: %s, uuid: %s)",
+					LOG_DEBUG("Successfully forwarded %zu bytes to server %s:%u (hostname: %s, uuid: %s)",
 						data->size,
 						dest_ctx->server.host,
 						dest_ctx->server.port,
-						data->metadata.hostname ?
-							data->metadata.hostname :
-							"unknown",
-						uuid_to_hex(
-							data->metadata
-								.write_uuid));
+						data->metadata.hostname ? data->metadata.hostname : "unknown",
+						uuid_to_hex(data->metadata.write_uuid));
 				}
 			}
 
@@ -856,6 +900,11 @@ static void *server_to_local_thread(void *arg)
 
 	while (!terminate) {
 		clipboard_data_t *data = NULL;
+		if (ctx->read_ssl_ctx == NULL) {
+			LOG_ERROR("No read SSL context for server %s:%u", ctx->server.host, ctx->server.port);
+			sleep(2);
+			continue;
+		}
 		if (receive_from_server(ctx, &data) < 0) {
 			LOG_ERROR(
 				"Failed to receive from server, reconnecting...");
@@ -942,23 +991,23 @@ static void *server_thread_func(void *arg)
 
 		// Start protocol threads (local->server, server->local)
 		pthread_t l2s_thread, s2l_thread;
-		if (pthread_create(&l2s_thread, NULL, local_to_server_thread,
-				   ctx) < 0) {
-			LOG_ERROR(
-				"[thread] Failed to create local->server thread");
-			ssl_context_free(ctx->ssl_ctx);
-			ctx->ssl_ctx = NULL;
+		if (pthread_create(&l2s_thread, NULL, local_to_server_thread, ctx) < 0) {
+			LOG_ERROR("[thread] Failed to create local->server thread");
+			ssl_context_free(ctx->read_ssl_ctx);
+			ctx->read_ssl_ctx = NULL;
+			ssl_context_free(ctx->write_ssl_ctx);
+			ctx->write_ssl_ctx = NULL;
 			sleep(2);
 			continue;
 		}
-		if (pthread_create(&s2l_thread, NULL, server_to_local_thread,
-				   ctx) < 0) {
-			LOG_ERROR(
-				"[thread] Failed to create server->local thread");
+		if (pthread_create(&s2l_thread, NULL, server_to_local_thread, ctx) < 0) {
+			LOG_ERROR("[thread] Failed to create server->local thread");
 			*(ctx->terminate) = 1;
 			pthread_join(l2s_thread, NULL);
-			ssl_context_free(ctx->ssl_ctx);
-			ctx->ssl_ctx = NULL;
+			ssl_context_free(ctx->read_ssl_ctx);
+			ctx->read_ssl_ctx = NULL;
+			ssl_context_free(ctx->write_ssl_ctx);
+			ctx->write_ssl_ctx = NULL;
 			sleep(2);
 			continue;
 		}
@@ -967,9 +1016,13 @@ static void *server_thread_func(void *arg)
 		pthread_join(s2l_thread, NULL);
 
 		// Clean up connection
-		if (ctx->ssl_ctx) {
-			ssl_context_free(ctx->ssl_ctx);
-			ctx->ssl_ctx = NULL;
+		if (ctx->read_ssl_ctx) {
+			ssl_context_free(ctx->read_ssl_ctx);
+			ctx->read_ssl_ctx = NULL;
+		}
+		if (ctx->write_ssl_ctx) {
+			ssl_context_free(ctx->write_ssl_ctx);
+			ctx->write_ssl_ctx = NULL;
 		}
 		// If not terminating, reconnect after delay
 		if (!*(ctx->terminate)) {
@@ -1165,18 +1218,21 @@ int main(int argc, char **argv)
 
 	// Use shutdown() to unblock recv() in other threads, then close()
 	for (int i = 0; i < num_servers; ++i) {
-		if (server_ctxs[i].ssl_ctx &&
-		    server_ctxs[i].ssl_ctx->sock_fd >= 0) {
-			int fd = server_ctxs[i].ssl_ctx->sock_fd;
-			LOG_DEBUG(
-				"main: shutdown(SHUT_RDWR) socket fd %d for server thread %d",
-				fd, i);
+		if (server_ctxs[i].read_ssl_ctx && server_ctxs[i].read_ssl_ctx->sock_fd >= 0) {
+			int fd = server_ctxs[i].read_ssl_ctx->sock_fd;
+			LOG_DEBUG("main: shutdown(SHUT_RDWR) read socket fd %d for server thread %d", fd, i);
 			shutdown(fd, SHUT_RDWR);
-			LOG_DEBUG(
-				"main: closing socket fd %d for server thread %d",
-				fd, i);
+			LOG_DEBUG("main: closing read socket fd %d for server thread %d", fd, i);
 			close(fd);
-			server_ctxs[i].ssl_ctx->sock_fd = -1;
+			server_ctxs[i].read_ssl_ctx->sock_fd = -1;
+		}
+		if (server_ctxs[i].write_ssl_ctx && server_ctxs[i].write_ssl_ctx->sock_fd >= 0) {
+			int fd = server_ctxs[i].write_ssl_ctx->sock_fd;
+			LOG_DEBUG("main: shutdown(SHUT_RDWR) write socket fd %d for server thread %d", fd, i);
+			shutdown(fd, SHUT_RDWR);
+			LOG_DEBUG("main: closing write socket fd %d for server thread %d", fd, i);
+			close(fd);
+			server_ctxs[i].write_ssl_ctx->sock_fd = -1;
 		}
 	}
 
@@ -1188,10 +1244,13 @@ int main(int argc, char **argv)
 
 	// After threads have exited, close any open sockets to ensure clean shutdown
 	for (int i = 0; i < num_servers; ++i) {
-		if (server_ctxs[i].ssl_ctx &&
-		    server_ctxs[i].ssl_ctx->sock_fd >= 0) {
-			close(server_ctxs[i].ssl_ctx->sock_fd);
-			server_ctxs[i].ssl_ctx->sock_fd = -1;
+		if (server_ctxs[i].read_ssl_ctx && server_ctxs[i].read_ssl_ctx->sock_fd >= 0) {
+			close(server_ctxs[i].read_ssl_ctx->sock_fd);
+			server_ctxs[i].read_ssl_ctx->sock_fd = -1;
+		}
+		if (server_ctxs[i].write_ssl_ctx && server_ctxs[i].write_ssl_ctx->sock_fd >= 0) {
+			close(server_ctxs[i].write_ssl_ctx->sock_fd);
+			server_ctxs[i].write_ssl_ctx->sock_fd = -1;
 		}
 	}
 
