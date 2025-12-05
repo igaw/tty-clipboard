@@ -976,9 +976,18 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	// Prepare per-server thread contexts
-	pthread_t server_threads[2];
-	bridge_server_ctx_t server_ctxs[2];
+	// Prepare per-server thread contexts (dynamic allocation)
+	pthread_t *server_threads = calloc(num_servers, sizeof(pthread_t));
+	bridge_server_ctx_t *server_ctxs = calloc(num_servers, sizeof(bridge_server_ctx_t));
+	if (!server_threads || !server_ctxs) {
+		LOG_ERROR("Memory allocation failed for server threads or contexts");
+		free(server_threads);
+		free(server_ctxs);
+		tls_config_cleanup(&tls_config);
+		plugin->cleanup(plugin_handle);
+		if (tls_debug_file) fclose(tls_debug_file);
+		return 1;
+	}
 	for (int i = 0; i < num_servers; ++i) {
 		memset(&server_ctxs[i], 0, sizeof(bridge_server_ctx_t));
 		server_ctxs[i].plugin = plugin;
@@ -999,6 +1008,8 @@ int main(int argc, char **argv)
 	}
 
 	// Cleanup
+	free(server_threads);
+	free(server_ctxs);
 	tls_config_cleanup(&tls_config);
 	plugin->cleanup(plugin_handle);
 	if (tls_debug_file) fclose(tls_debug_file);
