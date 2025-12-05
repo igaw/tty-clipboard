@@ -447,33 +447,26 @@ static bridge_ssl_ctx_t *ssl_context_create(bridge_tls_config_t *tls_cfg,
 static int send_protobuf_message(mbedtls_ssl_context *ssl,
 				 ProtobufCMessage *msg)
 {
-	size_t size = protobuf_c_message_get_packed_size(msg);
-	unsigned char *buf = malloc(size);
+	// IDENTICAL to client pb_send_envelope
+	size_t sz = ttycb__envelope__get_packed_size((Ttycb__Envelope *)msg);
+	uint8_t *buf = malloc(sz);
 	if (!buf)
 		return -1;
-
-	/* Pack message */
-	protobuf_c_message_pack(msg, buf);
-
-	/* Send length as big-endian uint64 */
-	uint64_t len = htobe64(size);
-	if (mbedtls_ssl_write(ssl, (unsigned char *)&len, sizeof(len)) <= 0) {
+	ttycb__envelope__pack((Ttycb__Envelope *)msg, buf);
+	uint64_t pfx = htobe64((uint64_t)sz);
+	if (mbedtls_ssl_write(ssl, (unsigned char *)&pfx, sizeof(pfx)) <= 0) {
 		free(buf);
 		return -1;
 	}
-
-	/* Send message in chunks */
 	size_t total = 0;
-	while (total < size) {
-		int w = mbedtls_ssl_write(ssl, (unsigned char *)buf + total,
-					  size - total);
+	while (total < sz) {
+		int w = mbedtls_ssl_write(ssl, buf + total, sz - total);
 		if (w <= 0) {
 			free(buf);
 			return -1;
 		}
 		total += (size_t)w;
 	}
-
 	free(buf);
 	return 0;
 }
@@ -689,7 +682,7 @@ static int send_to_server(bridge_server_ctx_t *ctx,
 	write.timestamp = data->metadata.timestamp;
 	write.write_uuid.data = (uint8_t *)data->metadata.write_uuid;
 	write.write_uuid.len = UUID_SIZE;
-	write.client_id = 1; // Bridge uses fixed client_id for forwarding
+	write.client_id = 1234;
 
 	env.body_case = TTYCB__ENVELOPE__BODY_WRITE;
 	env.write = &write;
