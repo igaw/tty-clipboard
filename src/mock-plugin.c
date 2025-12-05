@@ -2,6 +2,7 @@
 /* Copyright (C) 2024 Daniel Wagner <wagi@monom.org> */
 
 #include "plugin.h"
+#include "tty-clipboard.h"
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
@@ -109,6 +110,16 @@ static clipboard_data_t *mock_read(plugin_handle_t handle)
 	memcpy(cdata->data, ctx->data, ctx->size);
 	memcpy(&cdata->metadata, &ctx->metadata, sizeof(clipboard_metadata_t));
 
+	// Logging: trace read operation
+	char uuid_buf[33];
+	for (int i = 0; i < 16; ++i) sprintf(&uuid_buf[i*2], "%02x", ctx->metadata.write_uuid[i]);
+	uuid_buf[32] = '\0';
+	LOG_INFO("[MOCK] Read %zu bytes, hostname: %s, ts: %ld, uuid: %s",
+		ctx->size,
+		ctx->metadata.hostname[0] ? ctx->metadata.hostname : "unknown",
+		(long)ctx->metadata.timestamp,
+		uuid_buf);
+
 	return cdata;
 }
 
@@ -134,8 +145,18 @@ static int mock_write(plugin_handle_t handle, const clipboard_data_t *data)
 		memcpy(ctx->data, data->data, data->size);
 		ctx->size = data->size;
 		memcpy(&ctx->metadata, &data->metadata,
-		       sizeof(clipboard_metadata_t));
+			   sizeof(clipboard_metadata_t));
 	}
+
+	// Logging: trace write operation
+	char uuid_buf[33];
+	for (int i = 0; i < 16; ++i) sprintf(&uuid_buf[i*2], "%02x", data->metadata.write_uuid[i]);
+	uuid_buf[32] = '\0';
+	LOG_INFO("[MOCK] Write %zu bytes, hostname: %s, ts: %ld, uuid: %s",
+		data->size,
+		data->metadata.hostname[0] ? data->metadata.hostname : "unknown",
+		(long)data->metadata.timestamp,
+		uuid_buf);
 
 	/* Clear pending change flag when bridge writes to local clipboard */
 	ctx->local_change_pending = 0;

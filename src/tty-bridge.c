@@ -689,6 +689,7 @@ static int send_to_server(bridge_server_ctx_t *ctx,
 	write.timestamp = data->metadata.timestamp;
 	write.write_uuid.data = (uint8_t *)data->metadata.write_uuid;
 	write.write_uuid.len = UUID_SIZE;
+	write.client_id = 1; // Bridge uses fixed client_id for forwarding
 
 	env.body_case = TTYCB__ENVELOPE__BODY_WRITE;
 	env.write = &write;
