@@ -664,6 +664,56 @@ tls_setup:
 	return 0;
 }
 
+// Helper to connect and set up write SSL context for a server
+	static bridge_ssl_ctx_t *bridge_connect_write_ssl(bridge_server_ctx_t *ctx)
+	{
+		int sock = -1;
+		struct sockaddr_in server_address;
+		memset(&server_address, 0, sizeof(server_address));
+		server_address.sin_family = AF_INET;
+		server_address.sin_port = htons(ctx->server.port);
+		if (inet_pton(AF_INET, ctx->server.host, &server_address.sin_addr) <= 0) {
+			LOG_ERROR("inet_pton failed for write socket to %s", ctx->server.host);
+			return NULL;
+		}
+		sock = socket(AF_INET, SOCK_STREAM, 0);
+		if (sock < 0) {
+			LOG_ERROR("Failed to create write socket to %s:%u", ctx->server.host, ctx->server.port);
+			return NULL;
+		}
+		if (connect(sock, (struct sockaddr *)&server_address, sizeof(server_address)) != 0) {
+			LOG_ERROR("Failed to connect write socket to %s:%u", ctx->server.host, ctx->server.port);
+			close(sock);
+			return NULL;
+		}
+		bridge_ssl_ctx_t *ssl_ctx = ssl_context_create(ctx->tls_config, sock);
+		if (!ssl_ctx) {
+			LOG_ERROR("Failed to create write SSL context");
+			close(sock);
+			return NULL;
+		}
+		mbedtls_ssl_set_bio(&ssl_ctx->ssl, (void *)(intptr_t)sock, ssl_send_callback, ssl_recv_callback, NULL);
+		// Perform SSL handshake
+		int ret;
+		while ((ret = mbedtls_ssl_handshake(&ssl_ctx->ssl)) != 0) {
+			if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+				if (*(ctx->terminate)) {
+					LOG_INFO("Handshake interrupted by shutdown");
+					ssl_context_free(ssl_ctx);
+					return NULL;
+				}
+				usleep(10000);
+				continue;
+			}
+			LOG_ERROR("SSL handshake (write) to %s:%u failed: -0x%04x", ctx->server.host, ctx->server.port, -ret);
+			ssl_context_free(ssl_ctx);
+			close(sock);
+			return NULL;
+		}
+		LOG_INFO("write connection to %s:%u", ctx->server.host, ctx->server.port);
+		return ssl_ctx;
+	}
+
 /**
  * Send clipboard data to server
  */
@@ -687,74 +737,12 @@ static int send_to_server(bridge_server_ctx_t *ctx,
 	env.write = &write;
 
 	if (!ctx->write_ssl_ctx) {
-		// Create a new socket/SSL context for writing if not already present
-		int sock = -1;
-		struct sockaddr_in server_address;
-		memset(&server_address, 0, sizeof(server_address));
-		server_address.sin_family = AF_INET;
-		server_address.sin_port = htons(ctx->server.port);
-		if (inet_pton(AF_INET, ctx->server.host,
-			      &server_address.sin_addr) > 0) {
-			sock = socket(AF_INET, SOCK_STREAM, 0);
-			if (sock >= 0 &&
-			    connect(sock, (struct sockaddr *)&server_address,
-				    sizeof(server_address)) == 0) {
-				ctx->write_ssl_ctx = ssl_context_create(
-					ctx->tls_config, sock);
-				if (!ctx->write_ssl_ctx) {
-					LOG_ERROR(
-						"Failed to create write SSL context");
-					close(sock);
-					return -1;
-				}
-				mbedtls_ssl_set_bio(&ctx->write_ssl_ctx->ssl,
-						    (void *)(intptr_t)sock,
-						    ssl_send_callback,
-						    ssl_recv_callback, NULL);
-				// Perform SSL handshake
-				int ret;
-				while ((ret = mbedtls_ssl_handshake(
-						&ctx->write_ssl_ctx->ssl)) !=
-				       0) {
-					if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
-					    ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
-						if (*(ctx->terminate)) {
-							LOG_INFO(
-								"Handshake interrupted by shutdown");
-							ssl_context_free(
-								ctx->write_ssl_ctx);
-							ctx->write_ssl_ctx =
-								NULL;
-							return -1;
-						}
-						usleep(10000);
-						continue;
-					}
-					LOG_ERROR(
-						"SSL handshake (write) to %s:%u failed: -0x%04x",
-						ctx->server.host,
-						ctx->server.port, -ret);
-					ssl_context_free(ctx->write_ssl_ctx);
-					ctx->write_ssl_ctx = NULL;
-					close(sock);
-					return -1;
-				}
-			} else {
-				LOG_ERROR(
-					"Failed to connect write socket to %s:%u",
-					ctx->server.host, ctx->server.port);
-				if (sock >= 0)
-					close(sock);
-				return -1;
-			}
-			LOG_INFO("write connection to %s:%u",
-				ctx->server.host, ctx->server.port);
-		} else {
-			LOG_ERROR("inet_pton failed for write socket to %s",
-				  ctx->server.host);
+		ctx->write_ssl_ctx = bridge_connect_write_ssl(ctx);
+		if (!ctx->write_ssl_ctx) {
 			return -1;
 		}
 	}
+	
 	LOG_INFO("send_to_server: sending protobuf message to %s:%u",
 		 ctx->server.host, ctx->server.port);
 	return send_protobuf_message(&ctx->write_ssl_ctx->ssl, &env.base);
