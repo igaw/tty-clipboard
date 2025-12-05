@@ -41,6 +41,12 @@
 #pragma GCC diagnostic pop
 
 static FILE *tls_debug_file = NULL;
+static volatile sig_atomic_t terminate = 0;
+
+// SIGUSR1 handler to interrupt blocking syscalls (does nothing)
+static void sigusr1_handler(int sig) {
+	(void)sig;
+}
 
 /* TLS debug callback */
 static void tls_debug(void *ctx, int level, const char *file, int line,
@@ -57,6 +63,9 @@ static void tls_debug(void *ctx, int level, const char *file, int line,
 static int ssl_send_callback(void *ctx, const unsigned char *buf, size_t len)
 {
 	int fd = (int)(intptr_t)ctx;
+	if (terminate) {
+		return MBEDTLS_ERR_NET_CONN_RESET;
+	}
 	ssize_t ret = send(fd, buf, len, 0);
 	if (ret < 0) {
 		if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -69,6 +78,9 @@ static int ssl_send_callback(void *ctx, const unsigned char *buf, size_t len)
 static int ssl_recv_callback(void *ctx, unsigned char *buf, size_t len)
 {
 	int fd = (int)(intptr_t)ctx;
+	if (terminate) {
+		return MBEDTLS_ERR_NET_CONN_RESET;
+	}
 	ssize_t ret = recv(fd, buf, len, 0);
 	if (ret < 0) {
 		if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -119,7 +131,7 @@ typedef struct {
 	const char *tls_debug_log;
 } bridge_server_ctx_t;
 
-static volatile sig_atomic_t terminate = 0;
+
 
 static void signal_handler(int sig)
 {
@@ -138,6 +150,16 @@ static int setup_signals(void)
 	if (sigaction(SIGINT, &sa, NULL) < 0 ||
 	    sigaction(SIGTERM, &sa, NULL) < 0) {
 		perror("sigaction");
+		return -1;
+	}
+	// Install SIGUSR1 handler for thread interruption
+	struct sigaction sa_usr1;
+	memset(&sa_usr1, 0, sizeof(sa_usr1));
+	sa_usr1.sa_handler = sigusr1_handler;
+	sigemptyset(&sa_usr1.sa_mask);
+	sa_usr1.sa_flags = 0;
+	if (sigaction(SIGUSR1, &sa_usr1, NULL) < 0) {
+		perror("sigaction SIGUSR1");
 		return -1;
 	}
 	return 0;
@@ -519,16 +541,6 @@ tls_setup:
 
 	LOG_DEBUG("TCP connection established");
 
-	/* Set socket receive timeout to allow periodic checking of terminate flag */
-	struct timeval tv;
-	tv.tv_sec = 2; /* 2 second timeout */
-	tv.tv_usec = 0;
-	if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const void *)&tv,
-		       sizeof(tv)) < 0) {
-		LOG_WARN("Failed to set socket timeout: %s", strerror(errno));
-		/* Continue anyway - timeout not critical */
-	}
-
 	/* Create a fresh SSL context for this connection */
 	ctx->ssl_ctx = ssl_context_create(ctx->tls_config, sock);
 	if (!ctx->ssl_ctx) {
@@ -541,15 +553,24 @@ tls_setup:
 	mbedtls_ssl_set_bio(&ctx->ssl_ctx->ssl, (void *)(intptr_t)sock,
 				ssl_send_callback, ssl_recv_callback, NULL);
 
-	/* Perform SSL handshake (loop for WANT_READ/WANT_WRITE) */
+
+	/* Perform SSL handshake (loop for WANT_READ/WANT_WRITE, check terminate) */
 	LOG_DEBUG("Performing SSL handshake");
 	while ((ret = mbedtls_ssl_handshake(&ctx->ssl_ctx->ssl)) != 0) {
-		if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-			LOG_ERROR("SSL handshake to %s:%u failed: -0x%04x", host, port, -ret);
-			ssl_context_free(ctx->ssl_ctx);
-			ctx->ssl_ctx = NULL;
-			return -1;
+		if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+			if (*(ctx->terminate)) {
+				LOG_INFO("Handshake interrupted by shutdown");
+				ssl_context_free(ctx->ssl_ctx);
+				ctx->ssl_ctx = NULL;
+				return -1;
+			}
+			usleep(10000); // 10ms sleep to avoid busy loop
+			continue;
 		}
+		LOG_ERROR("SSL handshake to %s:%u failed: -0x%04x", host, port, -ret);
+		ssl_context_free(ctx->ssl_ctx);
+		ctx->ssl_ctx = NULL;
+		return -1;
 	}
 
 	LOG_INFO("Connected to server");
@@ -802,6 +823,14 @@ static void usage(const char *prog)
 
 static void *server_thread_func(void *arg) {
 	bridge_server_ctx_t *ctx = (bridge_server_ctx_t *)arg;
+
+	// Block SIGINT and SIGTERM in this thread so only main thread receives them
+	sigset_t set;
+	sigemptyset(&set);
+	sigaddset(&set, SIGINT);
+	sigaddset(&set, SIGTERM);
+	pthread_sigmask(SIG_BLOCK, &set, NULL);
+
 	while (!*(ctx->terminate)) {
 		// Connect to server (creates socket, TLS, handshake, subscribe)
 		if (connect_to_server(ctx, ctx->server.host, ctx->server.port) != 0) {
@@ -1001,10 +1030,23 @@ int main(int argc, char **argv)
 		pthread_create(&server_threads[i], NULL, server_thread_func, &server_ctxs[i]);
 	}
 
+	// Send SIGUSR1 to all server threads to interrupt blocking syscalls
+	for (int i = 0; i < num_servers; ++i) {
+		pthread_kill(server_threads[i], SIGUSR1);
+	}
+
 	// Main thread waits for all server threads
 	for (int i = 0; i < num_servers; ++i) {
 		pthread_join(server_threads[i], NULL);
 		pthread_mutex_destroy(&server_ctxs[i].data_mutex);
+	}
+
+	// After threads have exited, close any open sockets to ensure clean shutdown
+	for (int i = 0; i < num_servers; ++i) {
+		if (server_ctxs[i].ssl_ctx && server_ctxs[i].ssl_ctx->sock_fd >= 0) {
+			close(server_ctxs[i].ssl_ctx->sock_fd);
+			server_ctxs[i].ssl_ctx->sock_fd = -1;
+		}
 	}
 
 	// Cleanup
