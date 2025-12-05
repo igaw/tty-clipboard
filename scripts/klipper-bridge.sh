@@ -192,6 +192,10 @@ fi
 
 debug_log "Starting Klipper→TTY bridge process (using clipboardHistoryUpdated signal)"
 
+# Shared state file for tracking last written content to avoid feedback loops
+LAST_WRITTEN_FILE="/tmp/tty-clipboard-bridge-last-written-${USER}"
+: > "$LAST_WRITTEN_FILE"  # Create empty file
+
 (
     # Monitor Klipper clipboard changes via D-Bus signal
     $QDBUS --system-bus --print-reply \
@@ -200,11 +204,28 @@ debug_log "Starting Klipper→TTY bridge process (using clipboardHistoryUpdated 
         debug_log "Error: Klipper not found on session bus"
     }
     
+    last_sent_to_tty=""
     # Use dbus-monitor to watch for clipboardHistoryUpdated signal
     dbus-monitor --session "type='signal',interface='org.kde.klipper.klipper',member='clipboardHistoryUpdated'" | while read -r line; do
         # When we get a signal, fetch the current clipboard content
         if echo "$line" | grep -q "member=clipboardHistoryUpdated"; then
             current_content=$($QDBUS org.kde.klipper /klipper org.kde.klipper.klipper.getClipboardContents 2>/dev/null || echo "")
+            
+            # Read what was last written by the TTY→Klipper bridge
+            last_from_tty=$(cat "$LAST_WRITTEN_FILE" 2>/dev/null || echo "")
+            
+            # Skip if this is the same content we just wrote from TTY
+            if [ "$current_content" = "$last_from_tty" ]; then
+                if [ "$DEBUG" = true ]; then
+                    echo "[$(date +'%Y-%m-%d %H:%M:%S')] Skipping write - content matches last TTY→Klipper write" >&2
+                fi
+                continue
+            fi
+            
+            # Skip if we already sent this exact content
+            if [ "$current_content" = "$last_sent_to_tty" ]; then
+                continue
+            fi
             
             if [ -n "$current_content" ]; then
                 if [ "$DEBUG" = true ]; then
@@ -223,6 +244,7 @@ debug_log "Starting Klipper→TTY bridge process (using clipboardHistoryUpdated 
                 else
                     echo "$current_content" | tty-cb-client -p "$PORTS" write "$SERVER" 2>/dev/null
                 fi
+                last_sent_to_tty="$current_content"
             fi
         fi
     done
@@ -249,7 +271,9 @@ debug_log "Starting TTY→Klipper bridge process"
                     # This is a log message from tty-cb-client, just echo to stderr
                     echo "[$(date +'%Y-%m-%d %H:%M:%S')] $line" >&2
                 else
-                    # This is actual clipboard content
+                    # This is actual clipboard content - save it to the state file
+                    echo "$line" > "$LAST_WRITTEN_FILE"
+                    
                     echo "[$(date +'%Y-%m-%d %H:%M:%S')] Received clipboard data: $line" >&2
                     echo "[$(date +'%Y-%m-%d %H:%M:%S')] Writing to Klipper clipboard..." >&2
                     $QDBUS org.kde.klipper /klipper org.kde.klipper.klipper.setClipboardContents "$line" 2>&1 | while read -r klipper_line; do
@@ -260,6 +284,8 @@ debug_log "Starting TTY→Klipper bridge process"
             done
         else
             tty-cb-client -p "$PORTS" read_blocked "$SERVER" 2>/dev/null | while IFS= read -r line; do
+                # Save to state file to prevent feedback loop
+                echo "$line" > "$LAST_WRITTEN_FILE"
                 $QDBUS org.kde.klipper /klipper org.kde.klipper.klipper.setClipboardContents "$line" 2>/dev/null
             done
         fi
@@ -320,7 +346,7 @@ cleanup() {
         pkill -KILL -P "$TTY_TO_KLIPPER_PID" 2>/dev/null || true
     fi
     # Clean up PID files
-    rm -f "$PIDFILE_KLIPPER_TO_TTY" "$PIDFILE_TTY_TO_KLIPPER" 2>/dev/null || true
+    rm -f "$PIDFILE_KLIPPER_TO_TTY" "$PIDFILE_TTY_TO_KLIPPER" "$LAST_WRITTEN_FILE" 2>/dev/null || true
     debug_log "Bridge stopped"
     exit 0
 }

@@ -17,6 +17,11 @@ else
   message('Using mbedTLS 2.x API')
 endif
 
+# Check if building static - provides own getaddrinfo stub for static builds
+if get_option('static')
+  config_conf.set('STATIC_BUILD', '1', description: 'Static build - using getaddrinfo stub')
+endif
+
 config_h = configure_file(
   output: 'config.h',
   configuration: config_conf
@@ -31,17 +36,15 @@ pb = custom_target('gen-proto',
   depends: protoc_depends,
 )
 
-pb_inc = include_directories('.')
-
 # Compile protobuf-generated code with reduced warnings
 pb_lib = static_library('protobuf-gen',
   pb,
   c_args: ['-Wno-pedantic'],
-  include_directories: [pb_inc, protobuf_inc],
+  include_directories: [protobuf_inc],
 )
 
-server_sources = ['tty-server.c', 'tty-clipboard.c', config_h]
-client_sources = ['tty-client.c', 'tty-clipboard.c', config_h]
+server_sources = ['tty-server.c', 'tty-clipboard.c', config_h, pb[1]]  # pb[1] is the .h file
+client_sources = ['tty-client.c', 'tty-clipboard.c', config_h, pb[1]]
 
 common_deps = [mbedtls_dep, mbedx509_dep, mbedcrypto_dep, protobuf_dep]
 common_link_with = [pb_lib]
@@ -57,12 +60,24 @@ cb_server = executable('tty-cb-server', server_sources,
   dependencies: common_deps,
   link_with: common_link_with,
   link_args: link_args,
-  include_directories: pb_inc,
   install : true)
 
 cb_client = executable('tty-cb-client', client_sources,
   dependencies: common_deps,
   link_with: common_link_with,
   link_args: link_args,
-  include_directories: pb_inc,
+  install : true)
+
+# Clipboard bridge with plugin support
+# Single bridge binary that supports multiple plugins (wayland, klipper, mock)
+# Selected via --plugin argument
+
+bridge_common_sources = ['tty-bridge.c', 'tty-clipboard.c', config_h, pb[1]]
+bridge_plugin_sources = ['wayland-plugin.c', 'klipper-plugin.c', 'mock-plugin.c']
+
+cb_bridge = executable('tty-cb-bridge',
+  bridge_common_sources + bridge_plugin_sources,
+  dependencies: common_deps,
+  link_with: common_link_with,
+  link_args: link_args,
   install : true)

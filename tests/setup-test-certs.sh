@@ -28,6 +28,7 @@ keyUsage = critical, keyCertSign, cRLSign
 [v3_end]
 basicConstraints = CA:FALSE
 keyUsage = digitalSignature, keyEncipherment
+subjectAltName = DNS:tty-clipboard-server,DNS:localhost,IP:127.0.0.1,IP:127.0.0.2,IP:127.0.0.3
 EOF
 
 # Generate the CA private key (EC P-256)

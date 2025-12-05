@@ -31,11 +31,15 @@
 #include "clipboard.pb-c.h"
 #pragma GCC diagnostic pop
 
+static FILE *tls_debug_file = NULL;
+
 static void tls_debug(void *ctx, int level, const char *file, int line, const char *msg)
 {
 	(void)ctx;
-	fprintf(stderr, "mbedtls[%d] %24s:%5d: %s",
+	FILE *out = tls_debug_file ? tls_debug_file : stderr;
+	fprintf(out, "[SERVER] mbedtls[%d] %24s:%5d: %s",
 		level, basename(file), line, msg);
+	fflush(out);
 }
 
 // Helper to print mbedTLS errors
@@ -794,6 +798,7 @@ static void print_usage(const char *prog_name)
 	printf("  -p, --port PORT  Server port (default: %d)\n", SERVER_PORT);
 	printf("  -m, --max-size N[K|M|G]  Set maximum clipboard size (0=unlimited)\n");
 	printf("  --oversize-policy reject|drop  Action on oversize write (default: reject)\n");
+	printf("  --tls-debug-log FILE  Write TLS debug output to FILE (requires MBEDTLS_DEBUG=1)\n");
 	printf("\nProtocol:\n");
 	printf("  Client connects and sends command: %s, %s, or %s\n", CMD_READ,
 	       CMD_WRITE, CMD_READ_BLOCKED);
@@ -905,6 +910,7 @@ int main(int argc, char *argv[])
 	int server_port = SERVER_PORT;
 	const char *bind_addr = NULL;
 	char *max_size_arg = NULL;
+	const char *tls_debug_log = NULL;
 
 	static struct option long_options[] = {
 		{ "help", no_argument, 0, 'h' },
@@ -915,6 +921,7 @@ int main(int argc, char *argv[])
 		{ "port", required_argument, 0, 'p' },
 		{ "max-size", required_argument, 0, 'm' },
 		{ "oversize-policy", required_argument, 0, 1 },
+		{ "tls-debug-log", required_argument, 0, 2 },
 		{ 0, 0, 0, 0 }
 	};
 
@@ -958,6 +965,9 @@ int main(int argc, char *argv[])
 				exit(EXIT_FAILURE);
 			}
 			break;
+		case 2:
+			tls_debug_log = optarg;
+			break;
 		default:
 			print_usage(argv[0]);
 			exit(EXIT_FAILURE);
@@ -974,6 +984,32 @@ int main(int argc, char *argv[])
 	}
 
 	LOG_INFO("Starting tty-clipboard server version %s", VERSION);
+
+	// Open TLS debug file if debugging is enabled
+	const char *dbg = getenv("MBEDTLS_DEBUG");
+	if (dbg && *dbg) {
+		const char *debug_filename;
+		char auto_filename[512];
+		
+		if (tls_debug_log) {
+			debug_filename = tls_debug_log;
+		} else {
+			char hostname[256];
+			if (gethostname(hostname, sizeof(hostname)) < 0) {
+				strncpy(hostname, "unknown", sizeof(hostname));
+			}
+			snprintf(auto_filename, sizeof(auto_filename), 
+			         "/tmp/tty-server-%s-%d-tls-debug.log", hostname, server_port);
+			debug_filename = auto_filename;
+		}
+		
+		tls_debug_file = fopen(debug_filename, "w");
+		if (tls_debug_file) {
+			fprintf(stderr, "[SERVER] TLS debug output redirected to %s\n", debug_filename);
+		} else {
+			fprintf(stderr, "[SERVER] Warning: Failed to open TLS debug file: %s\n", debug_filename);
+		}
+	}
 
 	// Parse max size argument if provided
 	if (max_size_arg) {
@@ -1020,5 +1056,11 @@ int main(int argc, char *argv[])
 	mbedtls_ctr_drbg_free(&ctx->ctr_drbg);
 	free(ctx);
 	free(shared_buffer);
+
+	// Close TLS debug file if opened
+	if (tls_debug_file) {
+		fclose(tls_debug_file);
+	}
+
 	return 0;
 }

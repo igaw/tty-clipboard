@@ -171,6 +171,10 @@ fi
 # Clean up stale PID files (don't try to stop processes, they may be from previous runs)
 rm -f "$PIDFILE_WAYLAND_TO_TTY" "$PIDFILE_TTY_TO_WAYLAND"
 
+# Shared state file for tracking last written content to avoid feedback loops
+LAST_WRITTEN_FILE="/tmp/tty-clipboard-bridge-wayland-last-written-${USER}"
+: > "$LAST_WRITTEN_FILE"  # Create empty file
+
 # Wayland → TTY: Watch Wayland clipboard and write to tty-clipboard
 if [ "$VERBOSE" = true ]; then
     echo "Starting Wayland→TTY bridge..."
@@ -183,6 +187,15 @@ debug_log "Starting Wayland→TTY bridge process"
     while true; do
         # Get current clipboard content
         current_content=$(wl-paste 2>/dev/null || echo "")
+        
+        # Read what was last written by the TTY→Wayland bridge
+        last_from_tty=$(cat "$LAST_WRITTEN_FILE" 2>/dev/null || echo "")
+        
+        # Skip if this is the same content we just wrote from TTY
+        if [ "$current_content" = "$last_from_tty" ]; then
+            sleep 0.5
+            continue
+        fi
         
         # Check if content has changed
         if [ "$current_content" != "$last_content" ] && [ -n "$current_content" ]; then
@@ -232,7 +245,9 @@ debug_log "Starting TTY→Wayland bridge process"
                     # This is a log message from tty-cb-client, just echo to stderr
                     echo "[$(date +'%Y-%m-%d %H:%M:%S')] $line" >&2
                 else
-                    # This is actual clipboard content
+                    # This is actual clipboard content - save it to the state file
+                    echo "$line" > "$LAST_WRITTEN_FILE"
+                    
                     echo "[$(date +'%Y-%m-%d %H:%M:%S')] Received clipboard data: $line" >&2
                     echo "[$(date +'%Y-%m-%d %H:%M:%S')] Writing to Wayland clipboard..." >&2
                     echo "$line" | wl-copy 2>&1 | while read -r wl_line; do
@@ -243,6 +258,8 @@ debug_log "Starting TTY→Wayland bridge process"
             done
         else
             tty-cb-client -p "$PORTS" read_blocked "$SERVER" 2>/dev/null | while IFS= read -r line; do
+                # Save to state file to prevent feedback loop
+                echo "$line" > "$LAST_WRITTEN_FILE"
                 echo "$line" | wl-copy 2>/dev/null
             done
         fi
@@ -303,7 +320,7 @@ cleanup() {
         pkill -KILL -P "$TTY_TO_WAYLAND_PID" 2>/dev/null || true
     fi
     # Clean up PID files
-    rm -f "$PIDFILE_WAYLAND_TO_TTY" "$PIDFILE_TTY_TO_WAYLAND" 2>/dev/null || true
+    rm -f "$PIDFILE_WAYLAND_TO_TTY" "$PIDFILE_TTY_TO_WAYLAND" "$LAST_WRITTEN_FILE" 2>/dev/null || true
     debug_log "Bridge stopped"
     exit 0
 }

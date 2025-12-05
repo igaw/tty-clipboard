@@ -46,11 +46,15 @@ typedef struct {
 	ssl_context_t *ssl_ctx;
 } connection_t;
 
+static FILE *tls_debug_file = NULL;
+
 static void tls_debug(void *ctx, int level, const char *file, int line, const char *msg)
 {
 	(void)ctx;
-	fprintf(stderr, "mbedtls[%d] %24s:%5d: %s",
+	FILE *out = tls_debug_file ? tls_debug_file : stderr;
+	fprintf(out, "[CLIENT] mbedtls[%d] %24s:%5d: %s",
 		level, basename(file), line, msg);
+	fflush(out);
 }
 
 
@@ -447,6 +451,7 @@ static void print_usage(const char *prog_name)
 	printf("  -v, --verbose    Enable verbose logging (repeat for more detail)\n");
 	printf("  -s, --server IP  Server IP address (default: 127.0.0.1)\n");
 	printf("  -p, --port PORTS Server port(s), comma-separated (default: %d)\n", SERVER_PORT);
+	printf("  --tls-debug-log FILE  Write TLS debug output to FILE (requires MBEDTLS_DEBUG=1)\n");
 	printf("\nExamples:\n");
 	printf("  %s write                          # Write to localhost:5457\n",
 	       prog_name);
@@ -792,6 +797,7 @@ int main(int argc, char *argv[])
 	const char *port_str = NULL;
 	int opt;
 	int verbose_count = 0;
+	const char *tls_debug_log = NULL;
 
 	static struct option long_options[] = { { "help", no_argument, 0, 'h' },
 						{ "version", no_argument, 0,
@@ -802,6 +808,7 @@ int main(int argc, char *argv[])
 						  's' },
 						{ "port", required_argument, 0,
 						  'p' },
+						{ "tls-debug-log", required_argument, 0, 1 },
 						{ 0, 0, 0, 0 } };
 
 	while ((opt = getopt_long(argc, argv, "hvVs:p:", long_options, NULL)) !=
@@ -822,6 +829,9 @@ int main(int argc, char *argv[])
 		case 'p':
 			port_str = optarg;
 			break;
+		case 1:
+			tls_debug_log = optarg;
+			break;
 		default:
 			print_usage(argv[0]);
 			exit(EXIT_FAILURE);
@@ -835,6 +845,17 @@ int main(int argc, char *argv[])
 		current_log_level = LOG_LEVEL_DEBUG;
 	} else if (verbose_count >= 3) {
 		current_log_level = LOG_LEVEL_DEBUG;
+	}
+
+	// Open TLS debug file if debugging is enabled
+	const char *dbg = getenv("MBEDTLS_DEBUG");
+	if (dbg && *dbg && tls_debug_log) {
+		tls_debug_file = fopen(tls_debug_log, "w");
+		if (tls_debug_file) {
+			fprintf(stderr, "[CLIENT] TLS debug output redirected to %s\n", tls_debug_log);
+		} else {
+			fprintf(stderr, "[CLIENT] Warning: Failed to open TLS debug file: %s\n", tls_debug_log);
+		}
 	}
 
 	// Parse positional arguments
@@ -907,5 +928,11 @@ int main(int argc, char *argv[])
 	// Clean up
 	cleanup_connections(conns, port_count);
 	free(ports);
+	
+	// Close TLS debug file if opened
+	if (tls_debug_file) {
+		fclose(tls_debug_file);
+	}
+	
 	return 0;
 }

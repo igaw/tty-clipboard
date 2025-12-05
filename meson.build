@@ -2,7 +2,7 @@ project('tty-clipboard', 'c',
   version : '0.1',
   license : 'GPL-2.0-only',
   default_options : [
-    'warning_level=3',
+    'warning_level=3', # Force rebuild
     'c_std=gnu99'])
 
 # Find required dependencies

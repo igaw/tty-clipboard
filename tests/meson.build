@@ -138,6 +138,32 @@ test('multi-port',
   is_parallel: false,
 )
 
+test('bridge-mock',
+  find_program('test-bridge-mock.sh'),
+  args: [
+    cb_server.full_path(),
+    cb_client.full_path(),
+    cb_bridge.full_path(),
+    meson.current_build_dir() / 'test-config',
+  ],
+  depends: [cert_files, cb_server, cb_client, cb_bridge],
+  timeout: 60,
+  is_parallel: false,
+)
+
+test('bridge-subscribe',
+  find_program('test-bridge-subscribe.sh'),
+  args: [
+    cb_server.full_path(),
+    cb_client.full_path(),
+    cb_bridge.full_path(),
+    meson.current_build_dir() / 'test-config',
+  ],
+  depends: [cert_files, cb_server, cb_client, cb_bridge],
+  timeout: 60,
+  is_parallel: false,
+)
+
 test('update-ssh-localforward',
      find_program('bash'),
      args: [
