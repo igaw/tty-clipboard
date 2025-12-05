@@ -1,4 +1,3 @@
-#include <sys/syscall.h>
  /* SPDX-License-Identifier: GPL-2.0-only */
 /* Copyright (C) 2024 Daniel Wagner <wagi@monom.org> */
 
@@ -34,6 +33,7 @@
 #include <endian.h>
 #include <time.h>
 #include <libgen.h>
+#include <sys/syscall.h>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
@@ -46,6 +46,21 @@ static volatile sig_atomic_t terminate = 0;
 static pthread_mutex_t shutdown_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t shutdown_cond = PTHREAD_COND_INITIALIZER;
 
+
+#ifndef UUID_SIZE
+#define UUID_SIZE 16
+#endif
+#include <stdint.h>
+#include <stdio.h>
+// Helper to print UUID as hex string
+static char uuid_hex_buf[UUID_SIZE * 2 + 1];
+static const char *uuid_to_hex(const uint8_t *uuid) {
+    for (int i = 0; i < UUID_SIZE; ++i) {
+        sprintf(&uuid_hex_buf[i * 2], "%02x", uuid[i]);
+    }
+    uuid_hex_buf[UUID_SIZE * 2] = '\0';
+    return uuid_hex_buf;
+}
 
 static void signal_handler(int sig)
 {
@@ -197,6 +212,8 @@ typedef struct {
 	const char *tls_debug_log;
 } bridge_server_ctx_t;
 
+static int num_servers;
+static bridge_server_ctx_t *server_ctxs;
 
 /**
  * Stub getaddrinfo for static builds
@@ -756,21 +773,41 @@ static void *local_to_server_thread(void *arg)
 
 		/* Check if this is the same data we just received from server */
 		if (!clipboard_data_equal(data, ctx->last_remote_data)) {
-			/* New data from local clipboard, send to server */
-			LOG_DEBUG("Sending %zu bytes to server", data->size);
-			if (send_to_server(ctx, data) < 0) {
-				LOG_ERROR("Failed to send to server");
+			/* New data from local clipboard, forward to all other servers */
+			for (int i = 0; i < num_servers; ++i) {
+				bridge_server_ctx_t *dest_ctx = &server_ctxs[i];
+				if (dest_ctx == ctx) continue; // Don't send back to source
+				LOG_INFO("Forwarding %zu bytes from %s (uuid: %s) to server %s:%u (local host: %s)",
+					data->size,
+					data->metadata.hostname ? data->metadata.hostname : "unknown",
+					uuid_to_hex(data->metadata.write_uuid),
+					dest_ctx->server.host,
+					dest_ctx->server.port,
+					dest_ctx->local_hostname);
+				int send_result = send_to_server(dest_ctx, data);
+				if (send_result < 0) {
+					LOG_ERROR("Failed to forward to server %s:%u (hostname: %s, uuid: %s)",
+						dest_ctx->server.host,
+						dest_ctx->server.port,
+						data->metadata.hostname ? data->metadata.hostname : "unknown",
+						uuid_to_hex(data->metadata.write_uuid));
+				} else {
+					LOG_DEBUG("Successfully forwarded %zu bytes to server %s:%u (hostname: %s, uuid: %s)",
+						data->size,
+						dest_ctx->server.host,
+						dest_ctx->server.port,
+						data->metadata.hostname ? data->metadata.hostname : "unknown",
+						uuid_to_hex(data->metadata.write_uuid));
+				}
 			}
 
 			if (ctx->last_local_data) {
-				ctx->plugin->free_clipboard_data(
-					ctx->last_local_data);
+				ctx->plugin->free_clipboard_data(ctx->last_local_data);
 			}
 			ctx->last_local_data = data;
 		} else {
 			/* This is data we just wrote, skip it to prevent feedback loop */
-			LOG_DEBUG(
-				"Skipping echo: data matches last remote write");
+			LOG_DEBUG("Skipping echo: data matches last remote write");
 			ctx->plugin->free_clipboard_data(data);
 		}
 
@@ -809,8 +846,14 @@ static void *server_to_local_thread(void *arg)
 		/* Check if this is the same data we just sent */
 		if (!clipboard_data_equal(data, ctx->last_local_data)) {
 			/* New data from server, write to local clipboard */
-			LOG_DEBUG("Received %zu bytes from server (from %s)",
-				  data->size, data->metadata.hostname);
+			LOG_INFO("Received %zu bytes from server %s:%u, hostname: %s, ts: %ld, uuid: %s -> local host: %s",
+				data->size,
+				ctx->server.host,
+				ctx->server.port,
+				data->metadata.hostname ? data->metadata.hostname : "unknown",
+				(long)data->metadata.timestamp,
+				uuid_to_hex(data->metadata.write_uuid),
+				ctx->local_hostname);
 			if (ctx->plugin->write(ctx->plugin_handle, data) < 0) {
 				LOG_ERROR("Failed to write to local clipboard");
 			} else {
@@ -915,7 +958,7 @@ int main(int argc, char **argv)
 	const char *plugin_name = NULL;
 	const char *tls_debug_log = NULL;
 	server_endpoint_t servers[2];
-	int num_servers = 0;
+
 	char local_hostname[256] = {0};
 	const plugin_interface_t *plugin = NULL;
 	plugin_handle_t plugin_handle = NULL;
@@ -923,17 +966,17 @@ int main(int argc, char **argv)
 	struct option long_opts[] = { { "plugin", required_argument, 0, 'p' },
 								  { "server", required_argument, 0, 's' },
 								  { "verbose", no_argument, 0, 'v' },
-								  { "debug", no_argument, 0, 'd' },
 								  { "help", no_argument, 0, 'h' },
 								  { "tls-debug-log", required_argument, 0, 1 },
 								  { 0, 0, 0, 0 } };
-	int opt;
-	while ((opt = getopt_long(argc, argv, "p:s:vdh", long_opts, NULL)) != -1) {
-		switch (opt) {
-		case 'p':
-			plugin_name = optarg;
-			break;
-		case 's': {
+		int opt;
+		int verbose_count = 0;
+		while ((opt = getopt_long(argc, argv, "p:s:vh", long_opts, NULL)) != -1) {
+			switch (opt) {
+			case 'p':
+				plugin_name = optarg;
+				break;
+			case 's': {
 			char *server_str = strdup(optarg);
 			if (!server_str) {
 				LOG_ERROR("Memory allocation failed");
@@ -964,10 +1007,7 @@ int main(int argc, char **argv)
 			break;
 		}
 		case 'v':
-			current_log_level = LOG_LEVEL_INFO;
-			break;
-		case 'd':
-			current_log_level = LOG_LEVEL_DEBUG;
+			verbose_count++;
 			break;
 		case 'h':
 			usage(argv[0]);
@@ -979,6 +1019,13 @@ int main(int argc, char **argv)
 			usage(argv[0]);
 			return 1;
 		}
+	}
+
+	// Set log level based on verbose count
+	if (verbose_count == 1) {
+		current_log_level = LOG_LEVEL_INFO;
+	} else if (verbose_count >= 2) {
+		current_log_level = LOG_LEVEL_DEBUG;
 	}
 
 	if (!plugin_name || num_servers == 0) {
@@ -1035,7 +1082,7 @@ int main(int argc, char **argv)
 
 	// Prepare per-server thread contexts (dynamic allocation)
 	pthread_t *server_threads = calloc(num_servers, sizeof(pthread_t));
-	bridge_server_ctx_t *server_ctxs = calloc(num_servers, sizeof(bridge_server_ctx_t));
+	server_ctxs = calloc(num_servers, sizeof(bridge_server_ctx_t));
 	if (!server_threads || !server_ctxs) {
 		LOG_ERROR("Memory allocation failed for server threads or contexts");
 		free(server_threads);

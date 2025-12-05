@@ -52,44 +52,53 @@ if [[ -n "$MBEDTLS_DEBUG" ]]; then
 fi
 
 # Start remote server on 127.0.0.3
-"$SERVER_BIN" -b "$REMOTE_SERVER_IP" -p "$REMOTE_SERVER_PORT" "${REMOTE_TLS_ARGS[@]}" \
+"$SERVER_BIN" -v -b "$REMOTE_SERVER_IP" -p "$REMOTE_SERVER_PORT" "${REMOTE_TLS_ARGS[@]}" \
     > "$TEST_TMP_DIR/remote_server.log" 2>&1 &
 REMOTE_PID=$!
 sleep 1
 
 # Start local server on 127.0.0.2
-"$SERVER_BIN" -b "$LOCAL_SERVER_IP" -p "$LOCAL_SERVER_PORT" "${LOCAL_TLS_ARGS[@]}" \
+"$SERVER_BIN" -v -b "$LOCAL_SERVER_IP" -p "$LOCAL_SERVER_PORT" "${LOCAL_TLS_ARGS[@]}" \
     > "$TEST_TMP_DIR/local_server.log" 2>&1 &
 LOCAL_PID=$!
 sleep 1
 
+
 # Start bridge with mock plugin
 # Bridge connects from local (127.0.0.2) to remote (127.0.0.3)
-"$BRIDGE_BIN" --plugin mock --server "$REMOTE_SERVER_IP:$REMOTE_SERVER_PORT" -d \
+"$BRIDGE_BIN" -v --plugin mock --server "$LOCAL_SERVER_IP:$LOCAL_SERVER_PORT,$REMOTE_SERVER_IP:$REMOTE_SERVER_PORT" \
     "${BRIDGE_TLS_ARGS[@]}" > "$TEST_TMP_DIR/bridge.log" 2>&1 &
 BRIDGE_PID=$!
-sleep 2
 
-# Verify bridge started
-if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
-    echo "FAILED: Bridge failed to start"
+# Wait for bridge to connect (retry up to 10 seconds)
+RETRY=0
+MAX_RETRY=10
+while (( RETRY < MAX_RETRY )); do
+    sleep 1
+    if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+        echo "FAILED: Bridge failed to start"
+        cat "$TEST_TMP_DIR/bridge.log"
+        exit 1
+    fi
+    # Check for connection errors
+    if grep -q "Failed to connect\|Failed to initialize" "$TEST_TMP_DIR/bridge.log"; then
+        echo "FAILED: Bridge failed to connect to server"
+        echo "Logs are available in: $TEST_TMP_DIR"
+        echo "=== Bridge log ==="
+        cat "$TEST_TMP_DIR/bridge.log"
+        exit 1
+    fi
+    # Check for successful connection
+    if grep -q "Connected to server" "$TEST_TMP_DIR/bridge.log"; then
+        echo "PASSED: Bridge started and connected successfully"
+        break
+    fi
+    (( RETRY++ ))
+done
+if (( RETRY == MAX_RETRY )); then
+    echo "FAILED: Bridge did not connect within timeout"
     cat "$TEST_TMP_DIR/bridge.log"
     exit 1
-fi
-echo "PASSED: Bridge started successfully"
-
-# Check for connection errors in bridge log
-if grep -q "Failed to connect\|Failed to initialize" "$TEST_TMP_DIR/bridge.log"; then
-    echo "FAILED: Bridge failed to connect to server"
-    echo "Logs are available in: $TEST_TMP_DIR"
-    echo "=== Bridge log ==="
-    cat "$TEST_TMP_DIR/bridge.log"
-    exit 1
-fi
-
-# Check for successful connection
-if ! grep -q "Successfully connected to server" "$TEST_TMP_DIR/bridge.log"; then
-    echo "WARNING: No successful connection message found in bridge log"
 fi
 
 # Check for SSL errors in bridge log (these are fatal)

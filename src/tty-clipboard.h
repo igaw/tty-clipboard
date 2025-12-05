@@ -25,10 +25,12 @@ typedef enum {
 
 extern log_level_t current_log_level;
 
+
 #define LOG_ERROR(...) do { \
 	if (current_log_level >= LOG_LEVEL_ERROR) { \
 		fprintf(stderr, "[ERROR] " __VA_ARGS__); \
 		fprintf(stderr, "\n"); \
+		fflush(stderr); \
 	} \
 } while(0)
 
@@ -36,6 +38,7 @@ extern log_level_t current_log_level;
 	if (current_log_level >= LOG_LEVEL_WARN) { \
 		fprintf(stderr, "[WARN] " __VA_ARGS__); \
 		fprintf(stderr, "\n"); \
+		fflush(stderr); \
 	} \
 } while(0)
 
@@ -43,6 +46,7 @@ extern log_level_t current_log_level;
 	if (current_log_level >= LOG_LEVEL_INFO) { \
 		fprintf(stdout, "[INFO] " __VA_ARGS__); \
 		fprintf(stdout, "\n"); \
+		fflush(stdout); \
 	} \
 } while(0)
 
@@ -50,6 +54,7 @@ extern log_level_t current_log_level;
 	if (current_log_level >= LOG_LEVEL_DEBUG) { \
 		fprintf(stdout, "[DEBUG] " __VA_ARGS__); \
 		fprintf(stdout, "\n"); \
+		fflush(stdout); \
 	} \
 } while(0)
 

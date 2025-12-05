@@ -33,6 +33,21 @@
 
 static FILE *tls_debug_file = NULL;
 
+#ifndef UUID_SIZE
+#define UUID_SIZE 16
+#endif
+#include <stdint.h>
+#include <stdio.h>
+static char uuid_hex_buf[UUID_SIZE * 2 + 1];
+static const char *uuid_to_hex(const unsigned char *uuid) {
+	for (int i = 0; i < UUID_SIZE; ++i) {
+		sprintf(&uuid_hex_buf[i * 2], "%02x", uuid[i]);
+	}
+	uuid_hex_buf[UUID_SIZE * 2] = '\0';
+	return uuid_hex_buf;
+}
+
+
 static void tls_debug(void *ctx, int level, const char *file, int line,
 		      const char *msg)
 {
@@ -333,8 +348,11 @@ static int handle_write_request(mbedtls_ssl_context *ssl,
 	const unsigned char *data = write_req->data.data;
 	int oversize = (max_buffer_size && len > max_buffer_size);
 
-	LOG_DEBUG("Write request: %zu bytes from client_id %lu", len,
-		  write_req->client_id);
+	LOG_DEBUG("Write request: %zu bytes from client_id %lu, hostname: %s, ts: %ld, uuid: %s", len,
+			  write_req->client_id,
+			  write_req->hostname ? write_req->hostname : "unknown",
+			  (long)write_req->timestamp,
+			  uuid_to_hex(write_req->write_uuid.data));
 
 	if (oversize) {
 		LOG_WARN(
@@ -393,8 +411,10 @@ static int handle_write_request(mbedtls_ssl_context *ssl,
 	pthread_cond_broadcast(&buffer_cond);
 	pthread_mutex_unlock(&buffer_mutex);
 
-	LOG_INFO("Write completed: %zu bytes, message_id: %lu, from: %s", len,
-		 msg_id, write_req->hostname ? write_req->hostname : "unknown");
+	LOG_INFO("Write completed: %zu bytes, message_id: %lu, from: %s, ts: %ld, uuid: %s", len,
+			 msg_id, write_req->hostname ? write_req->hostname : "unknown",
+			 (long)write_req->timestamp,
+			 uuid_to_hex(write_req->write_uuid.data));
 
 	// Send success response with UUID echo
 	Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
@@ -420,7 +440,10 @@ static int handle_read_request(mbedtls_ssl_context *ssl)
 	strncpy(hostname_to_send, shared_hostname, sizeof(hostname_to_send));
 	int64_t timestamp_to_send = shared_timestamp;
 
-	LOG_INFO("Read completed: %zu bytes, message_id: %lu", len, msg_id);
+	LOG_INFO("Read completed: %zu bytes, message_id: %lu, hostname: %s, ts: %ld, uuid: %s", len, msg_id,
+			 hostname_to_send,
+			 (long)timestamp_to_send,
+			 uuid_to_hex(uuid_to_send));
 	Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
 	Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
 	df.data.len = len;
@@ -491,6 +514,10 @@ static int handle_subscribe_request(mbedtls_ssl_context *ssl,
 		last_sent_message_id = msg_id;
 		memcpy(last_sent_uuid, uuid_to_send, UUID_SIZE);
 
+		LOG_INFO("Sending update to subscriber: message_id: %lu, hostname: %s, ts: %ld, uuid: %s", msg_id,
+			 hostname_to_send,
+			 (long)timestamp_to_send,
+			 uuid_to_hex(uuid_to_send));
 		Ttycb__Envelope resp = TTYCB__ENVELOPE__INIT;
 		Ttycb__DataFrame df = TTYCB__DATA_FRAME__INIT;
 		df.data.len = len;
