@@ -48,15 +48,15 @@ typedef struct {
 
 static FILE *tls_debug_file = NULL;
 
-static void tls_debug(void *ctx, int level, const char *file, int line, const char *msg)
+static void tls_debug(void *ctx, int level, const char *file, int line,
+		      const char *msg)
 {
 	(void)ctx;
 	FILE *out = tls_debug_file ? tls_debug_file : stderr;
-	fprintf(out, "[CLIENT] mbedtls[%d] %24s:%5d: %s",
-		level, basename(file), line, msg);
+	fprintf(out, "[CLIENT] mbedtls[%d] %24s:%5d: %s", level, basename(file),
+		line, msg);
 	fflush(out);
 }
-
 
 // Forward declaration to avoid implicit declaration warnings
 void handle_error(const char *msg);
@@ -120,11 +120,13 @@ static void pb_send_envelope(ssl_context_t *ssl_ctx, Ttycb__Envelope *env)
 		handle_error("malloc");
 	ttycb__envelope__pack(env, buf);
 	uint64_t pfx = htobe64((uint64_t)sz);
-	if (mbedtls_ssl_write(&ssl_ctx->ssl, (unsigned char *)&pfx, sizeof(pfx)) <= 0)
+	if (mbedtls_ssl_write(&ssl_ctx->ssl, (unsigned char *)&pfx,
+			      sizeof(pfx)) <= 0)
 		handle_error("mbedtls_ssl_write prefix");
 	size_t total = 0;
 	while (total < sz) {
-		int w = mbedtls_ssl_write(&ssl_ctx->ssl, buf + total, sz - total);
+		int w = mbedtls_ssl_write(&ssl_ctx->ssl, buf + total,
+					  sz - total);
 		if (w <= 0)
 			handle_error("mbedtls_ssl_write msg");
 		total += (size_t)w;
@@ -135,7 +137,8 @@ static void pb_send_envelope(ssl_context_t *ssl_ctx, Ttycb__Envelope *env)
 static Ttycb__Envelope *pb_recv_envelope(ssl_context_t *ssl_ctx)
 {
 	uint64_t be = 0;
-	int r = mbedtls_ssl_read(&ssl_ctx->ssl, (unsigned char *)&be, sizeof(be));
+	int r = mbedtls_ssl_read(&ssl_ctx->ssl, (unsigned char *)&be,
+				 sizeof(be));
 	if (r <= 0) {
 		// Check if this is a clean shutdown or actual error
 		if (terminate || r == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
@@ -165,8 +168,8 @@ static Ttycb__Envelope *pb_recv_envelope(ssl_context_t *ssl_ctx)
 
 // Forward declarations
 static ssl_context_t *init_ssl_context(void);
-static int connect_to_server(const char *server_ip, int port, ssl_context_t *ssl_ctx,
-			       int *sock_fd);
+static int connect_to_server(const char *server_ip, int port,
+			     ssl_context_t *ssl_ctx, int *sock_fd);
 
 static int parse_ports(const char *port_str, int **ports_out, int *count_out)
 {
@@ -176,23 +179,24 @@ static int parse_ports(const char *port_str, int **ports_out, int *count_out)
 		if (*p == ',')
 			count++;
 	}
-	
+
 	int *ports = malloc(sizeof(int) * count);
 	if (!ports)
 		return -1;
-	
+
 	char *str_copy = strdup(port_str);
 	if (!str_copy) {
 		free(ports);
 		return -1;
 	}
-	
+
 	int idx = 0;
 	char *token = strtok(str_copy, ",");
 	while (token && idx < count) {
 		int port = atoi(token);
 		if (port <= 0 || port > 65535) {
-			fprintf(stderr, "Error: Invalid port number: %s\n", token);
+			fprintf(stderr, "Error: Invalid port number: %s\n",
+				token);
 			free(str_copy);
 			free(ports);
 			return -1;
@@ -200,7 +204,7 @@ static int parse_ports(const char *port_str, int **ports_out, int *count_out)
 		ports[idx++] = port;
 		token = strtok(NULL, ",");
 	}
-	
+
 	free(str_copy);
 	*ports_out = ports;
 	*count_out = idx;
@@ -208,12 +212,12 @@ static int parse_ports(const char *port_str, int **ports_out, int *count_out)
 }
 
 static connection_t *create_connections(const char *server_ip, int *ports,
-					 int port_count)
+					int port_count)
 {
 	connection_t *conns = calloc(port_count, sizeof(connection_t));
 	if (!conns)
 		return NULL;
-	
+
 	for (int i = 0; i < port_count; i++) {
 		conns[i].port = ports[i];
 		conns[i].ssl_ctx = init_ssl_context();
@@ -222,18 +226,23 @@ static connection_t *create_connections(const char *server_ip, int *ports,
 			for (int j = 0; j < i; j++) {
 				close(conns[j].sock_fd);
 				mbedtls_ssl_free(&conns[j].ssl_ctx->ssl);
-				mbedtls_ssl_config_free(&conns[j].ssl_ctx->conf);
-				mbedtls_x509_crt_free(&conns[j].ssl_ctx->cacert);
-				mbedtls_x509_crt_free(&conns[j].ssl_ctx->clicert);
+				mbedtls_ssl_config_free(
+					&conns[j].ssl_ctx->conf);
+				mbedtls_x509_crt_free(
+					&conns[j].ssl_ctx->cacert);
+				mbedtls_x509_crt_free(
+					&conns[j].ssl_ctx->clicert);
 				mbedtls_pk_free(&conns[j].ssl_ctx->pkey);
-				mbedtls_entropy_free(&conns[j].ssl_ctx->entropy);
-				mbedtls_ctr_drbg_free(&conns[j].ssl_ctx->ctr_drbg);
+				mbedtls_entropy_free(
+					&conns[j].ssl_ctx->entropy);
+				mbedtls_ctr_drbg_free(
+					&conns[j].ssl_ctx->ctr_drbg);
 				free(conns[j].ssl_ctx);
 			}
 			free(conns);
 			return NULL;
 		}
-		
+
 		if (connect_to_server(server_ip, ports[i], conns[i].ssl_ctx,
 				      &conns[i].sock_fd) != 0) {
 			LOG_ERROR("Failed to connect to port %d", ports[i]);
@@ -242,12 +251,17 @@ static connection_t *create_connections(const char *server_ip, int *ports,
 				if (j < i)
 					close(conns[j].sock_fd);
 				mbedtls_ssl_free(&conns[j].ssl_ctx->ssl);
-				mbedtls_ssl_config_free(&conns[j].ssl_ctx->conf);
-				mbedtls_x509_crt_free(&conns[j].ssl_ctx->cacert);
-				mbedtls_x509_crt_free(&conns[j].ssl_ctx->clicert);
+				mbedtls_ssl_config_free(
+					&conns[j].ssl_ctx->conf);
+				mbedtls_x509_crt_free(
+					&conns[j].ssl_ctx->cacert);
+				mbedtls_x509_crt_free(
+					&conns[j].ssl_ctx->clicert);
 				mbedtls_pk_free(&conns[j].ssl_ctx->pkey);
-				mbedtls_entropy_free(&conns[j].ssl_ctx->entropy);
-				mbedtls_ctr_drbg_free(&conns[j].ssl_ctx->ctr_drbg);
+				mbedtls_entropy_free(
+					&conns[j].ssl_ctx->entropy);
+				mbedtls_ctr_drbg_free(
+					&conns[j].ssl_ctx->ctr_drbg);
 				free(conns[j].ssl_ctx);
 			}
 			free(conns);
@@ -255,7 +269,7 @@ static connection_t *create_connections(const char *server_ip, int *ports,
 		}
 		LOG_INFO("Connected to %s:%d", server_ip, ports[i]);
 	}
-	
+
 	return conns;
 }
 
@@ -323,7 +337,8 @@ ssl_context_t *init_ssl_context()
 				    (const unsigned char *)pers, strlen(pers));
 	if (ret != 0) {
 		LOG_ERROR("mbedtls_ctr_drbg_seed failed: -0x%04x", -ret);
-		fprintf(stderr, "mbedtls_ctr_drbg_seed failed: -0x%04x\n", -ret);
+		fprintf(stderr, "mbedtls_ctr_drbg_seed failed: -0x%04x\n",
+			-ret);
 		exit(EXIT_FAILURE);
 	}
 	LOG_DEBUG("RNG initialized");
@@ -332,8 +347,10 @@ ssl_context_t *init_ssl_context()
 	LOG_DEBUG("Loading CA certificate from %s", ca);
 	ret = mbedtls_x509_crt_parse_file(&ssl_ctx->cacert, ca);
 	if (ret != 0) {
-		LOG_ERROR("Unable to load CA certificate from %s: -0x%04x", ca, -ret);
-		fprintf(stderr, "Unable to load CA certificate: -0x%04x\n", -ret);
+		LOG_ERROR("Unable to load CA certificate from %s: -0x%04x", ca,
+			  -ret);
+		fprintf(stderr, "Unable to load CA certificate: -0x%04x\n",
+			-ret);
 		exit(EXIT_FAILURE);
 	}
 
@@ -341,8 +358,10 @@ ssl_context_t *init_ssl_context()
 	LOG_DEBUG("Loading client certificate from %s", crt);
 	ret = mbedtls_x509_crt_parse_file(&ssl_ctx->clicert, crt);
 	if (ret != 0) {
-		LOG_ERROR("Unable to load client certificate from %s: -0x%04x", crt, -ret);
-		fprintf(stderr, "Unable to load client certificate: -0x%04x\n", -ret);
+		LOG_ERROR("Unable to load client certificate from %s: -0x%04x",
+			  crt, -ret);
+		fprintf(stderr, "Unable to load client certificate: -0x%04x\n",
+			-ret);
 		exit(EXIT_FAILURE);
 	}
 
@@ -351,40 +370,50 @@ ssl_context_t *init_ssl_context()
 #ifdef MBEDTLS_3X
 	// mbedTLS 3.x requires RNG parameters
 	ret = mbedtls_pk_parse_keyfile(&ssl_ctx->pkey, key, NULL,
-				      mbedtls_ctr_drbg_random, &ssl_ctx->ctr_drbg);
+				       mbedtls_ctr_drbg_random,
+				       &ssl_ctx->ctr_drbg);
 #else
 	// mbedTLS 2.x uses simpler API
 	ret = mbedtls_pk_parse_keyfile(&ssl_ctx->pkey, key, NULL);
 #endif
 	if (ret != 0) {
-		LOG_ERROR("Unable to load client private key from %s: -0x%04x", key, -ret);
-		fprintf(stderr, "Unable to load client private key: -0x%04x\n", -ret);
+		LOG_ERROR("Unable to load client private key from %s: -0x%04x",
+			  key, -ret);
+		fprintf(stderr, "Unable to load client private key: -0x%04x\n",
+			-ret);
 		exit(EXIT_FAILURE);
 	}
 
 	// Configure SSL/TLS defaults for client
-	ret = mbedtls_ssl_config_defaults(&ssl_ctx->conf,
-					  MBEDTLS_SSL_IS_CLIENT,
+	ret = mbedtls_ssl_config_defaults(&ssl_ctx->conf, MBEDTLS_SSL_IS_CLIENT,
 					  MBEDTLS_SSL_TRANSPORT_STREAM,
 					  MBEDTLS_SSL_PRESET_DEFAULT);
 	if (ret != 0) {
 		LOG_ERROR("mbedtls_ssl_config_defaults failed: -0x%04x", -ret);
-		fprintf(stderr, "mbedtls_ssl_config_defaults failed: -0x%04x\n", -ret);
+		fprintf(stderr, "mbedtls_ssl_config_defaults failed: -0x%04x\n",
+			-ret);
 		exit(EXIT_FAILURE);
 	}
 	LOG_DEBUG("SSL config initialized with defaults");
 
 	// Set RNG and I/O callbacks
-	mbedtls_ssl_conf_rng(&ssl_ctx->conf, mbedtls_ctr_drbg_random, &ssl_ctx->ctr_drbg);
+	mbedtls_ssl_conf_rng(&ssl_ctx->conf, mbedtls_ctr_drbg_random,
+			     &ssl_ctx->ctr_drbg);
 
 	// Prefer TLS 1.3 when available; keep TLS 1.2 as minimum for compatibility
 #ifdef MBEDTLS_3X
-	mbedtls_ssl_conf_min_tls_version(&ssl_ctx->conf, MBEDTLS_SSL_VERSION_TLS1_2);
-	mbedtls_ssl_conf_max_tls_version(&ssl_ctx->conf, MBEDTLS_SSL_VERSION_TLS1_3);
+	mbedtls_ssl_conf_min_tls_version(&ssl_ctx->conf,
+					 MBEDTLS_SSL_VERSION_TLS1_2);
+	mbedtls_ssl_conf_max_tls_version(&ssl_ctx->conf,
+					 MBEDTLS_SSL_VERSION_TLS1_3);
 #else
 	// mbedTLS 2.x supports up to TLS 1.2 only
-	mbedtls_ssl_conf_min_version(&ssl_ctx->conf, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3); // TLS 1.2
-	mbedtls_ssl_conf_max_version(&ssl_ctx->conf, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3);
+	mbedtls_ssl_conf_min_version(&ssl_ctx->conf,
+				     MBEDTLS_SSL_MAJOR_VERSION_3,
+				     MBEDTLS_SSL_MINOR_VERSION_3); // TLS 1.2
+	mbedtls_ssl_conf_max_version(&ssl_ctx->conf,
+				     MBEDTLS_SSL_MAJOR_VERSION_3,
+				     MBEDTLS_SSL_MINOR_VERSION_3);
 #endif
 
 	// Optional debug: enable detailed mbedTLS logging when MBEDTLS_DEBUG env var is set
@@ -398,10 +427,12 @@ ssl_context_t *init_ssl_context()
 	mbedtls_ssl_conf_ca_chain(&ssl_ctx->conf, &ssl_ctx->cacert, NULL);
 
 	// Set client certificate and private key
-	ret = mbedtls_ssl_conf_own_cert(&ssl_ctx->conf, &ssl_ctx->clicert, &ssl_ctx->pkey);
+	ret = mbedtls_ssl_conf_own_cert(&ssl_ctx->conf, &ssl_ctx->clicert,
+					&ssl_ctx->pkey);
 	if (ret != 0) {
 		LOG_ERROR("mbedtls_ssl_conf_own_cert failed: -0x%04x", -ret);
-		fprintf(stderr, "mbedtls_ssl_conf_own_cert failed: -0x%04x\n", -ret);
+		fprintf(stderr, "mbedtls_ssl_conf_own_cert failed: -0x%04x\n",
+			-ret);
 		exit(EXIT_FAILURE);
 	}
 
@@ -422,10 +453,12 @@ ssl_context_t *init_ssl_context()
 	ret = mbedtls_ssl_set_hostname(&ssl_ctx->ssl, "tty-clipboard-server");
 	if (ret != 0) {
 		LOG_ERROR("mbedtls_ssl_set_hostname failed: -0x%04x", -ret);
-		fprintf(stderr, "mbedtls_ssl_set_hostname failed: -0x%04x\n", -ret);
+		fprintf(stderr, "mbedtls_ssl_set_hostname failed: -0x%04x\n",
+			-ret);
 		exit(EXIT_FAILURE);
 	}
-	LOG_DEBUG("Hostname set to 'tty-clipboard-server' for certificate verification");
+	LOG_DEBUG(
+		"Hostname set to 'tty-clipboard-server' for certificate verification");
 #endif
 
 	return ssl_ctx;
@@ -450,7 +483,8 @@ static void print_usage(const char *prog_name)
 	printf("  -V, --version    Display version information\n");
 	printf("  -v, --verbose    Enable verbose logging (repeat for more detail)\n");
 	printf("  -s, --server IP  Server IP address (default: 127.0.0.1)\n");
-	printf("  -p, --port PORTS Server port(s), comma-separated (default: %d)\n", SERVER_PORT);
+	printf("  -p, --port PORTS Server port(s), comma-separated (default: %d)\n",
+	       SERVER_PORT);
 	printf("  --tls-debug-log FILE  Write TLS debug output to FILE (requires MBEDTLS_DEBUG=1)\n");
 	printf("\nExamples:\n");
 	printf("  %s write                          # Write to localhost:5457\n",
@@ -488,13 +522,16 @@ static void setup_signal_handler(void)
 	sa.sa_flags = 0;
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGINT, &sa, NULL);
-	sigaction(SIGTERM, &sa, NULL);  // Also handle SIGTERM for graceful shutdown
+	sigaction(SIGTERM, &sa,
+		  NULL); // Also handle SIGTERM for graceful shutdown
 }
 
 static uint64_t generate_client_id(ssl_context_t *ssl_ctx)
 {
 	uint64_t client_id;
-	if (mbedtls_ctr_drbg_random(&ssl_ctx->ctr_drbg, (unsigned char *)&client_id, sizeof(client_id)) != 0) {
+	if (mbedtls_ctr_drbg_random(&ssl_ctx->ctr_drbg,
+				    (unsigned char *)&client_id,
+				    sizeof(client_id)) != 0) {
 		fprintf(stderr, "Failed to generate client_id\n");
 		exit(EXIT_FAILURE);
 	}
@@ -503,8 +540,8 @@ static uint64_t generate_client_id(ssl_context_t *ssl_ctx)
 	return client_id;
 }
 
-static int connect_to_server(const char *server_ip, int port, ssl_context_t *ssl_ctx,
-			       int *sock_fd)
+static int connect_to_server(const char *server_ip, int port,
+			     ssl_context_t *ssl_ctx, int *sock_fd)
 {
 	int ret;
 	LOG_DEBUG("Creating socket for connection to %s:%d", server_ip, port);
@@ -534,13 +571,14 @@ static int connect_to_server(const char *server_ip, int port, ssl_context_t *ssl
 
 	// Set the socket for the SSL session
 	// Use custom callbacks that work with raw socket fds
-	mbedtls_ssl_set_bio(&ssl_ctx->ssl, (void *)(intptr_t)sock, 
+	mbedtls_ssl_set_bio(&ssl_ctx->ssl, (void *)(intptr_t)sock,
 			    ssl_send_callback, ssl_recv_callback, NULL);
 
 	// Perform SSL handshake
 	LOG_DEBUG("Performing SSL handshake");
 	while ((ret = mbedtls_ssl_handshake(&ssl_ctx->ssl)) != 0) {
-		if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+		if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
+		    ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
 			print_mbedtls_error("SSL handshake failed", ret);
 			close(sock);
 			exit(EXIT_FAILURE);
@@ -552,9 +590,12 @@ static int connect_to_server(const char *server_ip, int port, ssl_context_t *ssl
 	uint32_t flags = mbedtls_ssl_get_verify_result(&ssl_ctx->ssl);
 	if (flags != 0) {
 		char vrfy_buf[512];
-		mbedtls_x509_crt_verify_info(vrfy_buf, sizeof(vrfy_buf), "  ! ", flags);
-		LOG_ERROR("Server certificate verification failed:\n%s", vrfy_buf);
-		fprintf(stderr, "Server certificate verification failed:\n%s\n", vrfy_buf);
+		mbedtls_x509_crt_verify_info(vrfy_buf, sizeof(vrfy_buf), "  ! ",
+					     flags);
+		LOG_ERROR("Server certificate verification failed:\n%s",
+			  vrfy_buf);
+		fprintf(stderr, "Server certificate verification failed:\n%s\n",
+			vrfy_buf);
 		close(sock);
 		exit(EXIT_FAILURE);
 	}
@@ -589,14 +630,15 @@ static uint8_t *read_stdin_to_buffer(size_t *out_size)
 	return buf;
 }
 
-
 // Multi-port operations (work for both single and multi-port cases)
-static void do_write_multi(connection_t *conns, int count, uint64_t client_id, unsigned char *out_uuid)
+static void do_write_multi(connection_t *conns, int count, uint64_t client_id,
+			   unsigned char *out_uuid)
 {
 	size_t used;
 	LOG_DEBUG("Reading data from stdin for multi-port write operation");
 	uint8_t *buf = read_stdin_to_buffer(&used);
-	LOG_DEBUG("Read %zu bytes from stdin, writing to %d port(s)", used, count);
+	LOG_DEBUG("Read %zu bytes from stdin, writing to %d port(s)", used,
+		  count);
 
 	// Generate UUID once for all ports (same write operation)
 	unsigned char write_uuid[UUID_SIZE];
@@ -626,13 +668,15 @@ static void do_write_multi(connection_t *conns, int count, uint64_t client_id, u
 		wr.timestamp = timestamp;
 		env.write = &wr;
 		env.body_case = TTYCB__ENVELOPE__BODY_WRITE;
-		
+
 		LOG_DEBUG("Sending write request to port %d", conns[i].port);
 		pb_send_envelope(conns[i].ssl_ctx, &env);
-		
-		LOG_DEBUG("Waiting for write response from port %d", conns[i].port);
+
+		LOG_DEBUG("Waiting for write response from port %d",
+			  conns[i].port);
 		Ttycb__Envelope *resp = pb_recv_envelope(conns[i].ssl_ctx);
-		if (resp && resp->body_case == TTYCB__ENVELOPE__BODY_WRITE_RESP &&
+		if (resp &&
+		    resp->body_case == TTYCB__ENVELOPE__BODY_WRITE_RESP &&
 		    resp->write_resp && resp->write_resp->ok) {
 			LOG_INFO("Write to port %d completed, message_id: %lu",
 				 conns[i].port, resp->write_resp->message_id);
@@ -642,10 +686,11 @@ static void do_write_multi(connection_t *conns, int count, uint64_t client_id, u
 		}
 		ttycb__envelope__free_unpacked(resp, NULL);
 	}
-	
+
 	free(buf);
-	LOG_INFO("Write operation completed for %d/%d port(s)", success_count, count);
-	
+	LOG_INFO("Write operation completed for %d/%d port(s)", success_count,
+		 count);
+
 	// If any writes failed, exit with error
 	if (success_count != count) {
 		exit(EXIT_FAILURE);
@@ -655,7 +700,7 @@ static void do_write_multi(connection_t *conns, int count, uint64_t client_id, u
 static void do_read_multi(connection_t *conns, int count)
 {
 	LOG_DEBUG("Sending read requests to %d port(s)", count);
-	
+
 	// Send read request to all ports
 	for (int i = 0; i < count; i++) {
 		Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
@@ -665,38 +710,43 @@ static void do_read_multi(connection_t *conns, int count)
 		pb_send_envelope(conns[i].ssl_ctx, &env);
 		LOG_DEBUG("Read request sent to port %d", conns[i].port);
 	}
-	
+
 	// Wait for first response using poll
 	struct pollfd *fds = malloc(sizeof(struct pollfd) * count);
 	if (!fds)
 		handle_error("malloc pollfd");
-	
+
 	for (int i = 0; i < count; i++) {
 		fds[i].fd = conns[i].sock_fd;
 		fds[i].events = POLLIN;
 	}
-	
+
 	LOG_DEBUG("Waiting for data from any port");
 	int ret = poll(fds, count, -1);
 	if (ret < 0) {
 		free(fds);
 		handle_error("poll");
 	}
-	
+
 	// Read from first available port
 	for (int i = 0; i < count; i++) {
 		if (fds[i].revents & POLLIN) {
 			LOG_DEBUG("Data available from port %d", conns[i].port);
-			Ttycb__Envelope *resp = pb_recv_envelope(conns[i].ssl_ctx);
-			if (resp && resp->body_case == TTYCB__ENVELOPE__BODY_DATA &&
+			Ttycb__Envelope *resp =
+				pb_recv_envelope(conns[i].ssl_ctx);
+			if (resp &&
+			    resp->body_case == TTYCB__ENVELOPE__BODY_DATA &&
 			    resp->data) {
-				LOG_INFO("Received data from port %d, size: %zu bytes, message_id: %lu",
-					 conns[i].port, resp->data->data.len,
-					 resp->data->message_id);
-				if (resp->data->hostname && resp->data->hostname[0] != '\0') {
-					LOG_DEBUG("Data from host: %s, timestamp: %ld",
-						  resp->data->hostname,
-						  (long)resp->data->timestamp);
+				LOG_INFO(
+					"Received data from port %d, size: %zu bytes, message_id: %lu",
+					conns[i].port, resp->data->data.len,
+					resp->data->message_id);
+				if (resp->data->hostname &&
+				    resp->data->hostname[0] != '\0') {
+					LOG_DEBUG(
+						"Data from host: %s, timestamp: %ld",
+						resp->data->hostname,
+						(long)resp->data->timestamp);
 				}
 				fwrite(resp->data->data.data, 1,
 				       resp->data->data.len, stdout);
@@ -708,16 +758,18 @@ static void do_read_multi(connection_t *conns, int count)
 			ttycb__envelope__free_unpacked(resp, NULL);
 		}
 	}
-	
+
 	free(fds);
 	LOG_ERROR("No valid data received from any port");
 	exit(EXIT_FAILURE);
 }
 
-static void do_subscribe_multi(connection_t *conns, int count, uint64_t client_id, const unsigned char *init_uuid)
+static void do_subscribe_multi(connection_t *conns, int count,
+			       uint64_t client_id,
+			       const unsigned char *init_uuid)
 {
 	LOG_INFO("Starting subscription to %d port(s)", count);
-	
+
 	// Send subscribe request to all ports
 	for (int i = 0; i < count; i++) {
 		Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
@@ -728,17 +780,17 @@ static void do_subscribe_multi(connection_t *conns, int count, uint64_t client_i
 		pb_send_envelope(conns[i].ssl_ctx, &env);
 		LOG_DEBUG("Subscribe request sent to port %d", conns[i].port);
 	}
-	
+
 	// Setup poll fds
 	struct pollfd *fds = malloc(sizeof(struct pollfd) * count);
 	if (!fds)
 		handle_error("malloc pollfd");
-	
+
 	for (int i = 0; i < count; i++) {
 		fds[i].fd = conns[i].sock_fd;
 		fds[i].events = POLLIN;
 	}
-	
+
 	LOG_DEBUG("Entering multi-port subscription loop");
 	// Loop receiving updates from any port
 	while (!terminate) {
@@ -749,32 +801,38 @@ static void do_subscribe_multi(connection_t *conns, int count, uint64_t client_i
 			free(fds);
 			handle_error("poll");
 		}
-		
+
 		if (ret == 0)
 			continue; // timeout, check terminate flag
-		
+
 		// Check all ports for data
 		for (int i = 0; i < count; i++) {
 			if (fds[i].revents & POLLIN) {
 				Ttycb__Envelope *resp =
 					pb_recv_envelope(conns[i].ssl_ctx);
 				if (!resp) {
-					LOG_DEBUG("Connection closed on port %d",
-						  conns[i].port);
+					LOG_DEBUG(
+						"Connection closed on port %d",
+						conns[i].port);
 					fds[i].fd = -1; // Mark as closed
 					continue;
 				}
-				
-				if (resp->body_case == TTYCB__ENVELOPE__BODY_DATA &&
+
+				if (resp->body_case ==
+					    TTYCB__ENVELOPE__BODY_DATA &&
 				    resp->data) {
-					LOG_DEBUG("Received update from port %d, size: %zu bytes, message_id: %lu",
-						  conns[i].port,
-						  resp->data->data.len,
-						  resp->data->message_id);
-					if (resp->data->hostname && resp->data->hostname[0] != '\0') {
-						LOG_DEBUG("Data from host: %s, timestamp: %ld",
-							  resp->data->hostname,
-							  (long)resp->data->timestamp);
+					LOG_DEBUG(
+						"Received update from port %d, size: %zu bytes, message_id: %lu",
+						conns[i].port,
+						resp->data->data.len,
+						resp->data->message_id);
+					if (resp->data->hostname &&
+					    resp->data->hostname[0] != '\0') {
+						LOG_DEBUG(
+							"Data from host: %s, timestamp: %ld",
+							resp->data->hostname,
+							(long)resp->data
+								->timestamp);
 					}
 					fwrite(resp->data->data.data, 1,
 					       resp->data->data.len, stdout);
@@ -784,7 +842,7 @@ static void do_subscribe_multi(connection_t *conns, int count, uint64_t client_i
 			}
 		}
 	}
-	
+
 	free(fds);
 	LOG_INFO("Multi-port subscription ended");
 	(void)init_uuid; // Unused parameter
@@ -799,17 +857,15 @@ int main(int argc, char *argv[])
 	int verbose_count = 0;
 	const char *tls_debug_log = NULL;
 
-	static struct option long_options[] = { { "help", no_argument, 0, 'h' },
-						{ "version", no_argument, 0,
-						  'V' },
-						{ "verbose", no_argument, 0,
-						  'v' },
-						{ "server", required_argument, 0,
-						  's' },
-						{ "port", required_argument, 0,
-						  'p' },
-						{ "tls-debug-log", required_argument, 0, 1 },
-						{ 0, 0, 0, 0 } };
+	static struct option long_options[] = {
+		{ "help", no_argument, 0, 'h' },
+		{ "version", no_argument, 0, 'V' },
+		{ "verbose", no_argument, 0, 'v' },
+		{ "server", required_argument, 0, 's' },
+		{ "port", required_argument, 0, 'p' },
+		{ "tls-debug-log", required_argument, 0, 1 },
+		{ 0, 0, 0, 0 }
+	};
 
 	while ((opt = getopt_long(argc, argv, "hvVs:p:", long_options, NULL)) !=
 	       -1) {
@@ -852,9 +908,13 @@ int main(int argc, char *argv[])
 	if (dbg && *dbg && tls_debug_log) {
 		tls_debug_file = fopen(tls_debug_log, "w");
 		if (tls_debug_file) {
-			fprintf(stderr, "[CLIENT] TLS debug output redirected to %s\n", tls_debug_log);
+			fprintf(stderr,
+				"[CLIENT] TLS debug output redirected to %s\n",
+				tls_debug_log);
 		} else {
-			fprintf(stderr, "[CLIENT] Warning: Failed to open TLS debug file: %s\n", tls_debug_log);
+			fprintf(stderr,
+				"[CLIENT] Warning: Failed to open TLS debug file: %s\n",
+				tls_debug_log);
 		}
 	}
 
@@ -879,7 +939,7 @@ int main(int argc, char *argv[])
 	// Parse ports
 	int *ports = NULL;
 	int port_count = 0;
-	
+
 	if (!port_str) {
 		// Default to single port
 		ports = malloc(sizeof(int));
@@ -892,7 +952,7 @@ int main(int argc, char *argv[])
 			exit(EXIT_FAILURE);
 		}
 	}
-	
+
 	LOG_INFO("Configured %d port(s)", port_count);
 
 	// Set up signal handling
@@ -914,7 +974,7 @@ int main(int argc, char *argv[])
 	// Execute the requested role using multi-port functions
 	// (they handle both single and multiple ports efficiently)
 	LOG_INFO("Executing command: %s", role);
-	
+
 	if (strcmp(role, "write") == 0) {
 		do_write_multi(conns, port_count, client_id, NULL);
 	} else if (strcmp(role, "read") == 0) {
@@ -922,17 +982,17 @@ int main(int argc, char *argv[])
 	} else if (strcmp(role, "read_blocked") == 0) {
 		do_subscribe_multi(conns, port_count, client_id, NULL);
 	}
-	
+
 	LOG_INFO("Command completed successfully");
 
 	// Clean up
 	cleanup_connections(conns, port_count);
 	free(ports);
-	
+
 	// Close TLS debug file if opened
 	if (tls_debug_file) {
 		fclose(tls_debug_file);
 	}
-	
+
 	return 0;
 }
