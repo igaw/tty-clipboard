@@ -1,4 +1,4 @@
- /* SPDX-License-Identifier: GPL-2.0-only */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* Copyright (C) 2024 Daniel Wagner <wagi@monom.org> */
 
 #include "config.h"
@@ -46,7 +46,6 @@ static volatile sig_atomic_t terminate = 0;
 static pthread_mutex_t shutdown_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t shutdown_cond = PTHREAD_COND_INITIALIZER;
 
-
 #ifndef UUID_SIZE
 #define UUID_SIZE 16
 #endif
@@ -54,12 +53,13 @@ static pthread_cond_t shutdown_cond = PTHREAD_COND_INITIALIZER;
 #include <stdio.h>
 // Helper to print UUID as hex string
 static char uuid_hex_buf[UUID_SIZE * 2 + 1];
-static const char *uuid_to_hex(const uint8_t *uuid) {
-    for (int i = 0; i < UUID_SIZE; ++i) {
-        sprintf(&uuid_hex_buf[i * 2], "%02x", uuid[i]);
-    }
-    uuid_hex_buf[UUID_SIZE * 2] = '\0';
-    return uuid_hex_buf;
+static const char *uuid_to_hex(const uint8_t *uuid)
+{
+	for (int i = 0; i < UUID_SIZE; ++i) {
+		sprintf(&uuid_hex_buf[i * 2], "%02x", uuid[i]);
+	}
+	uuid_hex_buf[UUID_SIZE * 2] = '\0';
+	return uuid_hex_buf;
 }
 
 static void signal_handler(int sig)
@@ -82,7 +82,7 @@ static int setup_main_signals(void)
 	sigemptyset(&sa.sa_mask);
 	sa.sa_flags = SA_RESTART;
 	if (sigaction(SIGINT, &sa, NULL) < 0 ||
-		sigaction(SIGTERM, &sa, NULL) < 0) {
+	    sigaction(SIGTERM, &sa, NULL) < 0) {
 		perror("sigaction");
 		return -1;
 	}
@@ -118,27 +118,34 @@ static int ssl_send_callback(void *ctx, const unsigned char *buf, size_t len)
 	int fd = (int)(intptr_t)ctx;
 	LOG_DEBUG("ssl_send_callback: called (fd=%d, len=%zu)", fd, len);
 	if (terminate) {
-		LOG_DEBUG("ssl_send_callback: terminate set, returning MBEDTLS_ERR_NET_CONN_RESET");
+		LOG_DEBUG(
+			"ssl_send_callback: terminate set, returning MBEDTLS_ERR_NET_CONN_RESET");
 		return MBEDTLS_ERR_NET_CONN_RESET;
 	}
 	ssize_t ret = send(fd, buf, len, 0);
 	if (ret < 0) {
-		LOG_DEBUG("ssl_send_callback: send() failed, ret=%zd, errno=%d (%s)", ret, errno, strerror(errno));
+		LOG_DEBUG(
+			"ssl_send_callback: send() failed, ret=%zd, errno=%d (%s)",
+			ret, errno, strerror(errno));
 		if (errno == EINTR) {
-			LOG_DEBUG("ssl_send_callback: send() interrupted by EINTR");
+			LOG_DEBUG(
+				"ssl_send_callback: send() interrupted by EINTR");
 			return MBEDTLS_ERR_NET_CONN_RESET;
 		}
 		if (errno == EAGAIN || errno == EWOULDBLOCK)
 			return MBEDTLS_ERR_SSL_WANT_WRITE;
 		if (errno == EPIPE) {
-			LOG_DEBUG("ssl_send_callback: send() failed with EPIPE (broken pipe)");
+			LOG_DEBUG(
+				"ssl_send_callback: send() failed with EPIPE (broken pipe)");
 		} else if (errno == ECONNRESET) {
-			LOG_DEBUG("ssl_send_callback: send() failed with ECONNRESET (connection reset)");
+			LOG_DEBUG(
+				"ssl_send_callback: send() failed with ECONNRESET (connection reset)");
 		}
 		return MBEDTLS_ERR_NET_SEND_FAILED;
 	}
 	if (ret == 0) {
-		LOG_DEBUG("ssl_send_callback: send() returned 0 (peer closed connection)");
+		LOG_DEBUG(
+			"ssl_send_callback: send() returned 0 (peer closed connection)");
 		return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
 	}
 	return (int)ret;
@@ -149,25 +156,31 @@ static int ssl_recv_callback(void *ctx, unsigned char *buf, size_t len)
 	int fd = (int)(intptr_t)ctx;
 	LOG_DEBUG("ssl_recv_callback: called (fd=%d, len=%zu)", fd, len);
 	if (terminate) {
-		LOG_DEBUG("ssl_recv_callback: terminate set, returning MBEDTLS_ERR_NET_CONN_RESET");
+		LOG_DEBUG(
+			"ssl_recv_callback: terminate set, returning MBEDTLS_ERR_NET_CONN_RESET");
 		return MBEDTLS_ERR_NET_CONN_RESET;
 	}
 	ssize_t ret = recv(fd, buf, len, 0);
 	if (ret < 0) {
-		LOG_DEBUG("ssl_recv_callback: recv() failed, ret=%zd, errno=%d (%s)", ret, errno, strerror(errno));
+		LOG_DEBUG(
+			"ssl_recv_callback: recv() failed, ret=%zd, errno=%d (%s)",
+			ret, errno, strerror(errno));
 		if (errno == EINTR) {
-			LOG_DEBUG("ssl_recv_callback: recv() interrupted by EINTR");
+			LOG_DEBUG(
+				"ssl_recv_callback: recv() interrupted by EINTR");
 			return MBEDTLS_ERR_NET_CONN_RESET;
 		}
 		if (errno == EAGAIN || errno == EWOULDBLOCK)
 			return MBEDTLS_ERR_SSL_WANT_READ;
 		if (errno == ECONNRESET) {
-			LOG_DEBUG("ssl_recv_callback: recv() failed with ECONNRESET (connection reset)");
+			LOG_DEBUG(
+				"ssl_recv_callback: recv() failed with ECONNRESET (connection reset)");
 		}
 		return MBEDTLS_ERR_NET_RECV_FAILED;
 	}
 	if (ret == 0) {
-		LOG_DEBUG("ssl_recv_callback: recv() returned 0 (peer closed connection)");
+		LOG_DEBUG(
+			"ssl_recv_callback: recv() returned 0 (peer closed connection)");
 		return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
 	}
 	return (int)ret;
@@ -189,13 +202,11 @@ typedef struct {
 	int sock_fd;
 } bridge_ssl_ctx_t;
 
-
 /* Server endpoint configuration */
 typedef struct {
 	char host[256];
 	uint16_t port;
 } server_endpoint_t;
-
 
 /* Per-server thread context */
 typedef struct {
@@ -274,7 +285,8 @@ static int tls_config_init(bridge_tls_config_t *tls_cfg)
 	/* Seed RNG with personalization string to match client */
 	const char *pers = "tty_clipboard_client";
 	ret = mbedtls_ctr_drbg_seed(&tls_cfg->ctr_drbg, mbedtls_entropy_func,
-			    &tls_cfg->entropy, (const unsigned char *)pers, strlen(pers));
+				    &tls_cfg->entropy,
+				    (const unsigned char *)pers, strlen(pers));
 	if (ret) {
 		LOG_ERROR("mbedtls_ctr_drbg_seed failed: -0x%04x", -ret);
 		return -1;
@@ -413,7 +425,6 @@ static bridge_ssl_ctx_t *ssl_context_create(bridge_tls_config_t *tls_cfg,
 		return NULL;
 	}
 
-
 #ifdef MBEDTLS_3X
 	// mbedTLS 3.x requires setting hostname, matching the CN in our certificates
 	ret = mbedtls_ssl_set_hostname(&ssl_ctx->ssl, "tty-clipboard-server");
@@ -423,7 +434,8 @@ static bridge_ssl_ctx_t *ssl_context_create(bridge_tls_config_t *tls_cfg,
 		free(ssl_ctx);
 		return NULL;
 	}
-	LOG_DEBUG("Hostname set to 'tty-clipboard-server' for certificate verification");
+	LOG_DEBUG(
+		"Hostname set to 'tty-clipboard-server' for certificate verification");
 #endif
 
 	return ssl_ctx;
@@ -516,7 +528,8 @@ static Ttycb__Envelope *receive_protobuf_message(mbedtls_ssl_context *ssl)
  * Connect to clipboard server
  * [Force rebuild: 2025-12-05]
  */
-static int connect_to_server(bridge_server_ctx_t *ctx, const char *host, uint16_t port)
+static int connect_to_server(bridge_server_ctx_t *ctx, const char *host,
+			     uint16_t port)
 {
 	int ret;
 
@@ -601,13 +614,13 @@ tls_setup:
 
 	/* Set the socket for the SSL session using custom callbacks */
 	mbedtls_ssl_set_bio(&ctx->ssl_ctx->ssl, (void *)(intptr_t)sock,
-				ssl_send_callback, ssl_recv_callback, NULL);
-
+			    ssl_send_callback, ssl_recv_callback, NULL);
 
 	/* Perform SSL handshake (loop for WANT_READ/WANT_WRITE, check terminate) */
 	LOG_DEBUG("Performing SSL handshake");
 	while ((ret = mbedtls_ssl_handshake(&ctx->ssl_ctx->ssl)) != 0) {
-		if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+		if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
+		    ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
 			if (*(ctx->terminate)) {
 				LOG_INFO("Handshake interrupted by shutdown");
 				ssl_context_free(ctx->ssl_ctx);
@@ -617,7 +630,8 @@ tls_setup:
 			usleep(10000); // 10ms sleep to avoid busy loop
 			continue;
 		}
-		LOG_ERROR("SSL handshake to %s:%u failed: -0x%04x", host, port, -ret);
+		LOG_ERROR("SSL handshake to %s:%u failed: -0x%04x", host, port,
+			  -ret);
 		ssl_context_free(ctx->ssl_ctx);
 		ctx->ssl_ctx = NULL;
 		return -1;
@@ -661,7 +675,8 @@ tls_setup:
 /**
  * Send clipboard data to server
  */
-static int send_to_server(bridge_server_ctx_t *ctx, const clipboard_data_t *data)
+static int send_to_server(bridge_server_ctx_t *ctx,
+			  const clipboard_data_t *data)
 {
 	Ttycb__WriteRequest write = TTYCB__WRITE_REQUEST__INIT;
 	Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
@@ -684,7 +699,8 @@ static int send_to_server(bridge_server_ctx_t *ctx, const clipboard_data_t *data
 /**
  * Receive clipboard data from server
  */
-static int receive_from_server(bridge_server_ctx_t *ctx, clipboard_data_t **out_data)
+static int receive_from_server(bridge_server_ctx_t *ctx,
+			       clipboard_data_t **out_data)
 {
 	Ttycb__Envelope *env = receive_protobuf_message(&ctx->ssl_ctx->ssl);
 	if (!env)
@@ -776,38 +792,55 @@ static void *local_to_server_thread(void *arg)
 			/* New data from local clipboard, forward to all other servers */
 			for (int i = 0; i < num_servers; ++i) {
 				bridge_server_ctx_t *dest_ctx = &server_ctxs[i];
-				if (dest_ctx == ctx) continue; // Don't send back to source
-				LOG_INFO("Forwarding %zu bytes from %s (uuid: %s) to server %s:%u (local host: %s)",
+				if (dest_ctx == ctx)
+					continue; // Don't send back to source
+				LOG_INFO(
+					"Forwarding %zu bytes from %s (uuid: %s) to server %s:%u (local host: %s)",
 					data->size,
-					data->metadata.hostname ? data->metadata.hostname : "unknown",
+					data->metadata.hostname ?
+						data->metadata.hostname :
+						"unknown",
 					uuid_to_hex(data->metadata.write_uuid),
 					dest_ctx->server.host,
 					dest_ctx->server.port,
 					dest_ctx->local_hostname);
-				int send_result = send_to_server(dest_ctx, data);
+				int send_result =
+					send_to_server(dest_ctx, data);
 				if (send_result < 0) {
-					LOG_ERROR("Failed to forward to server %s:%u (hostname: %s, uuid: %s)",
+					LOG_ERROR(
+						"Failed to forward to server %s:%u (hostname: %s, uuid: %s)",
 						dest_ctx->server.host,
 						dest_ctx->server.port,
-						data->metadata.hostname ? data->metadata.hostname : "unknown",
-						uuid_to_hex(data->metadata.write_uuid));
+						data->metadata.hostname ?
+							data->metadata.hostname :
+							"unknown",
+						uuid_to_hex(
+							data->metadata
+								.write_uuid));
 				} else {
-					LOG_DEBUG("Successfully forwarded %zu bytes to server %s:%u (hostname: %s, uuid: %s)",
+					LOG_DEBUG(
+						"Successfully forwarded %zu bytes to server %s:%u (hostname: %s, uuid: %s)",
 						data->size,
 						dest_ctx->server.host,
 						dest_ctx->server.port,
-						data->metadata.hostname ? data->metadata.hostname : "unknown",
-						uuid_to_hex(data->metadata.write_uuid));
+						data->metadata.hostname ?
+							data->metadata.hostname :
+							"unknown",
+						uuid_to_hex(
+							data->metadata
+								.write_uuid));
 				}
 			}
 
 			if (ctx->last_local_data) {
-				ctx->plugin->free_clipboard_data(ctx->last_local_data);
+				ctx->plugin->free_clipboard_data(
+					ctx->last_local_data);
 			}
 			ctx->last_local_data = data;
 		} else {
 			/* This is data we just wrote, skip it to prevent feedback loop */
-			LOG_DEBUG("Skipping echo: data matches last remote write");
+			LOG_DEBUG(
+				"Skipping echo: data matches last remote write");
 			ctx->plugin->free_clipboard_data(data);
 		}
 
@@ -846,11 +879,12 @@ static void *server_to_local_thread(void *arg)
 		/* Check if this is the same data we just sent */
 		if (!clipboard_data_equal(data, ctx->last_local_data)) {
 			/* New data from server, write to local clipboard */
-			LOG_INFO("Received %zu bytes from server %s:%u, hostname: %s, ts: %ld, uuid: %s -> local host: %s",
-				data->size,
-				ctx->server.host,
-				ctx->server.port,
-				data->metadata.hostname ? data->metadata.hostname : "unknown",
+			LOG_INFO(
+				"Received %zu bytes from server %s:%u, hostname: %s, ts: %ld, uuid: %s -> local host: %s",
+				data->size, ctx->server.host, ctx->server.port,
+				data->metadata.hostname ?
+					data->metadata.hostname :
+					"unknown",
 				(long)data->metadata.timestamp,
 				uuid_to_hex(data->metadata.write_uuid),
 				ctx->local_hostname);
@@ -894,33 +928,39 @@ static void usage(const char *prog)
 	fprintf(stderr, "  -h, --help              Show this help\n");
 }
 
-
 // Thread function for each server connection
 
-static void *server_thread_func(void *arg) {
-
+static void *server_thread_func(void *arg)
+{
 	bridge_server_ctx_t *ctx = (bridge_server_ctx_t *)arg;
 	setup_worker_signals();
 
 	while (!*(ctx->terminate)) {
 		// Connect to server (creates socket, TLS, handshake, subscribe)
-		if (connect_to_server(ctx, ctx->server.host, ctx->server.port) != 0) {
-			LOG_ERROR("[thread] Failed to connect to %s:%u, retrying...", ctx->server.host, ctx->server.port);
+		if (connect_to_server(ctx, ctx->server.host,
+				      ctx->server.port) != 0) {
+			LOG_ERROR(
+				"[thread] Failed to connect to %s:%u, retrying...",
+				ctx->server.host, ctx->server.port);
 			sleep(2);
 			continue;
 		}
 
 		// Start protocol threads (local->server, server->local)
 		pthread_t l2s_thread, s2l_thread;
-		if (pthread_create(&l2s_thread, NULL, local_to_server_thread, ctx) < 0) {
-			LOG_ERROR("[thread] Failed to create local->server thread");
+		if (pthread_create(&l2s_thread, NULL, local_to_server_thread,
+				   ctx) < 0) {
+			LOG_ERROR(
+				"[thread] Failed to create local->server thread");
 			ssl_context_free(ctx->ssl_ctx);
 			ctx->ssl_ctx = NULL;
 			sleep(2);
 			continue;
 		}
-		if (pthread_create(&s2l_thread, NULL, server_to_local_thread, ctx) < 0) {
-			LOG_ERROR("[thread] Failed to create server->local thread");
+		if (pthread_create(&s2l_thread, NULL, server_to_local_thread,
+				   ctx) < 0) {
+			LOG_ERROR(
+				"[thread] Failed to create server->local thread");
 			*(ctx->terminate) = 1;
 			pthread_join(l2s_thread, NULL);
 			ssl_context_free(ctx->ssl_ctx);
@@ -939,13 +979,13 @@ static void *server_thread_func(void *arg) {
 		}
 		// If not terminating, reconnect after delay
 		if (!*(ctx->terminate)) {
-			LOG_INFO("[thread] Disconnected, will attempt reconnect");
+			LOG_INFO(
+				"[thread] Disconnected, will attempt reconnect");
 			sleep(2);
 		}
 	}
 	return NULL;
 }
-
 
 int main(int argc, char **argv)
 {
@@ -959,24 +999,26 @@ int main(int argc, char **argv)
 	const char *tls_debug_log = NULL;
 	server_endpoint_t servers[2];
 
-	char local_hostname[256] = {0};
+	char local_hostname[256] = { 0 };
 	const plugin_interface_t *plugin = NULL;
 	plugin_handle_t plugin_handle = NULL;
 
 	struct option long_opts[] = { { "plugin", required_argument, 0, 'p' },
-								  { "server", required_argument, 0, 's' },
-								  { "verbose", no_argument, 0, 'v' },
-								  { "help", no_argument, 0, 'h' },
-								  { "tls-debug-log", required_argument, 0, 1 },
-								  { 0, 0, 0, 0 } };
-		int opt;
-		int verbose_count = 0;
-		while ((opt = getopt_long(argc, argv, "p:s:vh", long_opts, NULL)) != -1) {
-			switch (opt) {
-			case 'p':
-				plugin_name = optarg;
-				break;
-			case 's': {
+				      { "server", required_argument, 0, 's' },
+				      { "verbose", no_argument, 0, 'v' },
+				      { "help", no_argument, 0, 'h' },
+				      { "tls-debug-log", required_argument, 0,
+					1 },
+				      { 0, 0, 0, 0 } };
+	int opt;
+	int verbose_count = 0;
+	while ((opt = getopt_long(argc, argv, "p:s:vh", long_opts, NULL)) !=
+	       -1) {
+		switch (opt) {
+		case 'p':
+			plugin_name = optarg;
+			break;
+		case 's': {
 			char *server_str = strdup(optarg);
 			if (!server_str) {
 				LOG_ERROR("Memory allocation failed");
@@ -988,12 +1030,16 @@ int main(int argc, char **argv)
 			while (token && server_idx < 2) {
 				char host[256];
 				uint16_t port;
-				if (sscanf(token, "%255[^:]:%hu", host, &port) != 2) {
-					LOG_ERROR("Invalid server format: %s (expected IP:PORT)", token);
+				if (sscanf(token, "%255[^:]:%hu", host,
+					   &port) != 2) {
+					LOG_ERROR(
+						"Invalid server format: %s (expected IP:PORT)",
+						token);
 					free(server_str);
 					return 1;
 				}
-				strncpy(servers[server_idx].host, host, sizeof(servers[server_idx].host) - 1);
+				strncpy(servers[server_idx].host, host,
+					sizeof(servers[server_idx].host) - 1);
 				servers[server_idx].port = port;
 				server_idx++;
 				token = strtok_r(NULL, ",", &saveptr);
@@ -1036,7 +1082,9 @@ int main(int argc, char **argv)
 
 	plugin = get_plugin_by_name(plugin_name);
 	if (!plugin) {
-		LOG_ERROR("Plugin '%s' not found. Available plugins: wayland, klipper, mock", plugin_name);
+		LOG_ERROR(
+			"Plugin '%s' not found. Available plugins: wayland, klipper, mock",
+			plugin_name);
 		return 1;
 	}
 	plugin_handle = plugin->init();
@@ -1060,15 +1108,20 @@ int main(int argc, char **argv)
 			debug_filename = tls_debug_log;
 		} else {
 			snprintf(auto_filename, sizeof(auto_filename),
-					 "/tmp/tty-bridge-%s-%s-%u-tls-debug.log",
-					 local_hostname, servers[0].host, servers[0].port);
+				 "/tmp/tty-bridge-%s-%s-%u-tls-debug.log",
+				 local_hostname, servers[0].host,
+				 servers[0].port);
 			debug_filename = auto_filename;
 		}
 		tls_debug_file = fopen(debug_filename, "w");
 		if (tls_debug_file) {
-			fprintf(stderr, "[BRIDGE] TLS debug output redirected to %s\n", debug_filename);
+			fprintf(stderr,
+				"[BRIDGE] TLS debug output redirected to %s\n",
+				debug_filename);
 		} else {
-			fprintf(stderr, "[BRIDGE] Warning: Failed to open TLS debug file: %s\n", debug_filename);
+			fprintf(stderr,
+				"[BRIDGE] Warning: Failed to open TLS debug file: %s\n",
+				debug_filename);
 		}
 	}
 
@@ -1084,12 +1137,14 @@ int main(int argc, char **argv)
 	pthread_t *server_threads = calloc(num_servers, sizeof(pthread_t));
 	server_ctxs = calloc(num_servers, sizeof(bridge_server_ctx_t));
 	if (!server_threads || !server_ctxs) {
-		LOG_ERROR("Memory allocation failed for server threads or contexts");
+		LOG_ERROR(
+			"Memory allocation failed for server threads or contexts");
 		free(server_threads);
 		free(server_ctxs);
 		tls_config_cleanup(&tls_config);
 		plugin->cleanup(plugin_handle);
-		if (tls_debug_file) fclose(tls_debug_file);
+		if (tls_debug_file)
+			fclose(tls_debug_file);
 		return 1;
 	}
 	for (int i = 0; i < num_servers; ++i) {
@@ -1097,15 +1152,15 @@ int main(int argc, char **argv)
 		server_ctxs[i].plugin = plugin;
 		server_ctxs[i].plugin_handle = plugin_handle;
 		server_ctxs[i].server = servers[i];
-		strncpy(server_ctxs[i].local_hostname, local_hostname, sizeof(server_ctxs[i].local_hostname)-1);
+		strncpy(server_ctxs[i].local_hostname, local_hostname,
+			sizeof(server_ctxs[i].local_hostname) - 1);
 		server_ctxs[i].tls_config = &tls_config;
 		pthread_mutex_init(&server_ctxs[i].data_mutex, NULL);
 		server_ctxs[i].terminate = &terminate;
 		server_ctxs[i].tls_debug_log = tls_debug_log;
-		pthread_create(&server_threads[i], NULL, server_thread_func, &server_ctxs[i]);
+		pthread_create(&server_threads[i], NULL, server_thread_func,
+			       &server_ctxs[i]);
 	}
-
-
 
 	// Wait for shutdown (terminate set by signal handler)
 	pthread_mutex_lock(&shutdown_mutex);
@@ -1114,16 +1169,18 @@ int main(int argc, char **argv)
 	}
 	pthread_mutex_unlock(&shutdown_mutex);
 
-
-
-
 	// Use shutdown() to unblock recv() in other threads, then close()
 	for (int i = 0; i < num_servers; ++i) {
-		if (server_ctxs[i].ssl_ctx && server_ctxs[i].ssl_ctx->sock_fd >= 0) {
+		if (server_ctxs[i].ssl_ctx &&
+		    server_ctxs[i].ssl_ctx->sock_fd >= 0) {
 			int fd = server_ctxs[i].ssl_ctx->sock_fd;
-			LOG_DEBUG("main: shutdown(SHUT_RDWR) socket fd %d for server thread %d", fd, i);
+			LOG_DEBUG(
+				"main: shutdown(SHUT_RDWR) socket fd %d for server thread %d",
+				fd, i);
 			shutdown(fd, SHUT_RDWR);
-			LOG_DEBUG("main: closing socket fd %d for server thread %d", fd, i);
+			LOG_DEBUG(
+				"main: closing socket fd %d for server thread %d",
+				fd, i);
 			close(fd);
 			server_ctxs[i].ssl_ctx->sock_fd = -1;
 		}
@@ -1137,7 +1194,8 @@ int main(int argc, char **argv)
 
 	// After threads have exited, close any open sockets to ensure clean shutdown
 	for (int i = 0; i < num_servers; ++i) {
-		if (server_ctxs[i].ssl_ctx && server_ctxs[i].ssl_ctx->sock_fd >= 0) {
+		if (server_ctxs[i].ssl_ctx &&
+		    server_ctxs[i].ssl_ctx->sock_fd >= 0) {
 			close(server_ctxs[i].ssl_ctx->sock_fd);
 			server_ctxs[i].ssl_ctx->sock_fd = -1;
 		}
@@ -1148,6 +1206,7 @@ int main(int argc, char **argv)
 	free(server_ctxs);
 	tls_config_cleanup(&tls_config);
 	plugin->cleanup(plugin_handle);
-	if (tls_debug_file) fclose(tls_debug_file);
+	if (tls_debug_file)
+		fclose(tls_debug_file);
 	return 0;
 }
