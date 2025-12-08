@@ -641,14 +641,12 @@ tls_setup:
 		ctx->read_ssl_ctx = NULL;
 		return -1;
 	}
-	if (client_id == 0)
-		client_id = 1; // ensure non-zero
+	// TODO: create the client_id and use it consentely everywhere
 	LOG_DEBUG("Generated client_id: %lu", client_id);
-
 	/* Send initial SUBSCRIBE request to start receiving updates */
 	Ttycb__SubscribeRequest sub = TTYCB__SUBSCRIBE_REQUEST__INIT;
 	Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
-	sub.client_id = client_id;
+	sub.client_id = 1234;
 	env.body_case = TTYCB__ENVELOPE__BODY_SUBSCRIBE;
 	env.subscribe = &sub;
 
