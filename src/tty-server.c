@@ -123,19 +123,87 @@ static size_t max_buffer_size = 0;
 typedef enum { OVERSIZE_REJECT = 0, OVERSIZE_DROP = 1 } oversize_policy_t;
 static oversize_policy_t oversize_policy = OVERSIZE_REJECT;
 
+// Per-client connection and UUID history tracking
 #define MAX_RECENT_UUIDS 10
-typedef struct {
+typedef struct client_info {
 	uint64_t client_id;
+	char hostname[256];
 	unsigned char recent_uuids[MAX_RECENT_UUIDS][UUID_SIZE];
 	int recent_count;
-} client_uuid_history_t;
+	int refcount; // Number of active connections
+	struct client_info *next;
+} client_info_t;
 
-// For simplicity, store per-thread history in thread-local storage
-#ifdef __GNUC__
-__thread client_uuid_history_t client_uuid_history = {0};
-#else
-_Thread_local client_uuid_history_t client_uuid_history = {0};
-#endif
+// Global client list (linked list)
+static client_info_t *client_list = NULL;
+pthread_mutex_t client_list_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Find client_info by client_id or hostname
+static client_info_t *find_client_info(uint64_t client_id) {
+	client_info_t *cur = client_list;
+	while (cur) {
+		if (cur->client_id == client_id)
+			return cur;
+		cur = cur->next;
+	}
+	return NULL;
+}
+
+// Add new client_info to global list
+static client_info_t *add_client_info(uint64_t client_id, const char *hostname) {
+	client_info_t *info = calloc(1, sizeof(client_info_t));
+	info->client_id = client_id;
+	if (hostname)
+		strncpy(info->hostname, hostname, sizeof(info->hostname)-1);
+	else
+		info->hostname[0] = '\0';
+	info->hostname[sizeof(info->hostname)-1] = '\0';
+	info->refcount = 1;
+	info->next = client_list;
+	client_list = info;
+	return info;
+}
+
+// Remove client_info from global list
+static void remove_client_info(client_info_t *info) {
+	client_info_t **cur = &client_list;
+	while (*cur) {
+		if (*cur == info) {
+			*cur = info->next;
+			free(info);
+			return;
+		}
+		cur = &((*cur)->next);
+	}
+}
+
+// Get or create client_info for a connection
+static client_info_t *get_or_create_client_info(uint64_t client_id, const char *hostname) {
+	pthread_mutex_lock(&client_list_mutex);
+	client_info_t *info = find_client_info(client_id);
+	if (info) {
+		info->refcount++;
+		// Optionally update hostname for logging if new value is provided
+		if (hostname && strcmp(info->hostname, hostname) != 0 && strlen(hostname) > 0) {
+			strncpy(info->hostname, hostname, sizeof(info->hostname)-1);
+			info->hostname[sizeof(info->hostname)-1] = '\0';
+		}
+	} else {
+		info = add_client_info(client_id, hostname);
+	}
+	pthread_mutex_unlock(&client_list_mutex);
+	return info;
+}
+
+// Release client_info when a connection closes
+static void release_client_info(client_info_t *info) {
+	pthread_mutex_lock(&client_list_mutex);
+	info->refcount--;
+	if (info->refcount <= 0) {
+		remove_client_info(info);
+	}
+	pthread_mutex_unlock(&client_list_mutex);
+}
 
 // Signal handler
 void handle_sigint(int sig __attribute__((unused)))
@@ -354,7 +422,8 @@ static int send_protobuf_response(mbedtls_ssl_context *ssl,
 }
 
 static int handle_write_request(mbedtls_ssl_context *ssl,
-				Ttycb__WriteRequest *write_req)
+							   Ttycb__WriteRequest *write_req,
+							   client_info_t *client_info)
 {
 	size_t len = write_req->data.len;
 	const unsigned char *data = write_req->data.data;
@@ -418,17 +487,17 @@ static int handle_write_request(mbedtls_ssl_context *ssl,
 	}
 	shared_timestamp = write_req->timestamp;
 
-	// Track recent UUIDs for this client (thread-local)
-	client_uuid_history.client_id = write_req->client_id;
-	if (write_req->write_uuid.len == UUID_SIZE) {
-		// Shift history if full
-		if (client_uuid_history.recent_count == MAX_RECENT_UUIDS) {
-			memmove(&client_uuid_history.recent_uuids[0], &client_uuid_history.recent_uuids[1], (MAX_RECENT_UUIDS-1)*UUID_SIZE);
-			client_uuid_history.recent_count--;
-		}
-		memcpy(client_uuid_history.recent_uuids[client_uuid_history.recent_count], write_req->write_uuid.data, UUID_SIZE);
-		client_uuid_history.recent_count++;
-	}
+	   // Track recent UUIDs for this client (shared per-client)
+	   if (client_info && write_req->write_uuid.len == UUID_SIZE) {
+		   pthread_mutex_lock(&client_list_mutex);
+		   if (client_info->recent_count == MAX_RECENT_UUIDS) {
+			   memmove(&client_info->recent_uuids[0], &client_info->recent_uuids[1], (MAX_RECENT_UUIDS-1)*UUID_SIZE);
+			   client_info->recent_count--;
+		   }
+		   memcpy(client_info->recent_uuids[client_info->recent_count], write_req->write_uuid.data, UUID_SIZE);
+		   client_info->recent_count++;
+		   pthread_mutex_unlock(&client_list_mutex);
+	   }
 
 	gen++;
 	pthread_cond_broadcast(&buffer_cond);
@@ -499,7 +568,8 @@ static int handle_read_request(mbedtls_ssl_context *ssl)
 }
 
 static int handle_subscribe_request(mbedtls_ssl_context *ssl,
-				    Ttycb__SubscribeRequest *sub_req)
+								   Ttycb__SubscribeRequest *sub_req,
+								   client_info_t *client_info)
 {
 	(void)sub_req; // Unused for now, but client_id could be used for filtering
 
@@ -536,19 +606,23 @@ static int handle_subscribe_request(mbedtls_ssl_context *ssl,
 		last_sent_message_id = msg_id;
 		memcpy(last_sent_uuid, uuid_to_send, UUID_SIZE);
 
-		// Check if this subscriber has recently written this UUID
-		int skip = 0;
-		for (int i = 0; i < client_uuid_history.recent_count; ++i) {
-			if (memcmp(client_uuid_history.recent_uuids[i], uuid_to_send, UUID_SIZE) == 0) {
-				skip = 1;
-				break;
+			// Check if this subscriber has recently written this UUID
+			int skip = 0;
+			if (client_info) {
+				pthread_mutex_lock(&client_list_mutex);
+				for (int i = 0; i < client_info->recent_count; ++i) {
+					if (memcmp(client_info->recent_uuids[i], uuid_to_send, UUID_SIZE) == 0) {
+						skip = 1;
+						break;
+					}
+				}
+				pthread_mutex_unlock(&client_list_mutex);
 			}
-		}
-		if (skip) {
-			LOG_DEBUG("Skipping update to subscriber (client_id: %lu) for recently written uuid: %s", client_uuid_history.client_id, uuid_to_hex(uuid_to_send));
-			pthread_mutex_unlock(&buffer_mutex);
-			continue;
-		}
+			if (skip) {
+				LOG_DEBUG("Skipping update to subscriber (client_id: %lu) for recently written uuid: %s", client_info ? client_info->client_id : 0, uuid_to_hex(uuid_to_send));
+				pthread_mutex_unlock(&buffer_mutex);
+				continue;
+			}
 
 		LOG_INFO("Sending update to subscriber: message_id: %lu, hostname: %s, ts: %ld, uuid: %s", msg_id,
 			 hostname_to_send,
@@ -626,9 +700,25 @@ static Ttycb__Envelope *receive_envelope(mbedtls_ssl_context *ssl, int *error)
 }
 
 // Protobuf client handler
+struct client_handler_args {
+	mbedtls_ssl_context *ssl;
+	uint64_t client_id;
+	char hostname[256];
+};
+
 void *client_handler(void *arg)
 {
-	mbedtls_ssl_context *ssl = (mbedtls_ssl_context *)arg;
+	struct client_handler_args *args = (struct client_handler_args *)arg;
+	mbedtls_ssl_context *ssl = args->ssl;
+	uint64_t client_id = args->client_id;
+	char hostname[256];
+	strncpy(hostname, args->hostname, sizeof(hostname)-1);
+	hostname[sizeof(hostname)-1] = '\0';
+	free(args);
+
+	// Start with placeholder client_info
+	client_info_t *client_info = get_or_create_client_info(client_id, hostname);
+	int client_info_placeholder = (client_id == 0 && strcmp(hostname, "unknown") == 0);
 
 	while (!terminate) {
 		int error = 0;
@@ -639,21 +729,42 @@ void *client_handler(void *arg)
 			continue; // Empty message, continue loop
 		}
 
+		// On first write/subscribe, update client_info if placeholder
+		if (client_info_placeholder &&
+			((env->body_case == TTYCB__ENVELOPE__BODY_WRITE && env->write) ||
+			 (env->body_case == TTYCB__ENVELOPE__BODY_SUBSCRIBE && env->subscribe))) {
+			uint64_t new_id = 0;
+			char new_hostname[256] = "unknown";
+			if (env->body_case == TTYCB__ENVELOPE__BODY_WRITE && env->write) {
+				new_id = env->write->client_id;
+				if (env->write->hostname)
+					strncpy(new_hostname, env->write->hostname, sizeof(new_hostname)-1);
+			} else if (env->body_case == TTYCB__ENVELOPE__BODY_SUBSCRIBE && env->subscribe) {
+				new_id = env->subscribe->client_id;
+				// No hostname field in SubscribeRequest; keep as "unknown"
+			}
+			new_hostname[sizeof(new_hostname)-1] = '\0';
+			// Only update if new_id or hostname is set
+			if (new_id != 0 || strcmp(new_hostname, "unknown") != 0) {
+				// Release placeholder
+				release_client_info(client_info);
+				// Get or create real client_info
+				client_info = get_or_create_client_info(new_id, new_hostname);
+				client_info_placeholder = 0;
+				LOG_INFO("Associated connection with client_id: %lu, hostname: %s", new_id, new_hostname);
+			}
+		}
+
 		int result = 0;
-		if (env->body_case == TTYCB__ENVELOPE__BODY_WRITE &&
-		    env->write) {
+		if (env->body_case == TTYCB__ENVELOPE__BODY_WRITE && env->write) {
 			LOG_DEBUG("Handling write request from client");
-			result = handle_write_request(ssl, env->write);
-		} else if (env->body_case == TTYCB__ENVELOPE__BODY_READ &&
-			   env->read) {
+			result = handle_write_request(ssl, env->write, client_info);
+		} else if (env->body_case == TTYCB__ENVELOPE__BODY_READ && env->read) {
 			LOG_DEBUG("Handling read request from client");
 			result = handle_read_request(ssl);
-		} else if (env->body_case == TTYCB__ENVELOPE__BODY_SUBSCRIBE &&
-			   env->subscribe) {
-			LOG_DEBUG(
-				"Handling subscribe request from client_id: %lu",
-				env->subscribe->client_id);
-			result = handle_subscribe_request(ssl, env->subscribe);
+		} else if (env->body_case == TTYCB__ENVELOPE__BODY_SUBSCRIBE && env->subscribe) {
+			LOG_DEBUG("Handling subscribe request from client_id: %lu", env->subscribe->client_id);
+			result = handle_subscribe_request(ssl, env->subscribe, client_info);
 		}
 
 		ttycb__envelope__free_unpacked(env, NULL);
@@ -665,6 +776,7 @@ void *client_handler(void *arg)
 	mbedtls_ssl_close_notify(ssl);
 	mbedtls_ssl_free(ssl);
 	free(ssl);
+	release_client_info(client_info);
 	pthread_exit(NULL);
 }
 
@@ -832,14 +944,19 @@ static int verify_client_certificate(mbedtls_ssl_context *ssl)
 	return 0;
 }
 
-static void spawn_client_handler(mbedtls_ssl_context *ssl, int client_fd)
+static void spawn_client_handler(mbedtls_ssl_context *ssl, int client_fd, uint64_t client_id, const char *hostname)
 {
 	pthread_t client_thread;
-	if (pthread_create(&client_thread, NULL, client_handler, (void *)ssl) !=
-	    0) {
+	struct client_handler_args *args = calloc(1, sizeof(struct client_handler_args));
+	args->ssl = ssl;
+	args->client_id = client_id;
+	strncpy(args->hostname, hostname, sizeof(args->hostname)-1);
+	args->hostname[sizeof(args->hostname)-1] = '\0';
+	if (pthread_create(&client_thread, NULL, client_handler, (void *)args) != 0) {
 		perror("Failed to create client thread");
 		mbedtls_ssl_free(ssl);
 		free(ssl);
+		free(args);
 		close(client_fd);
 		return;
 	}
@@ -862,8 +979,7 @@ static void *start_server(void *data)
 			continue; // Timeout or error, try again
 
 		// Setup SSL for client
-		mbedtls_ssl_context *ssl =
-			setup_client_ssl(args->ctx, client_fd);
+		mbedtls_ssl_context *ssl = setup_client_ssl(args->ctx, client_fd);
 		if (!ssl)
 			continue;
 
@@ -876,8 +992,14 @@ static void *start_server(void *data)
 			continue;
 		}
 
-		// Spawn client handler thread
-		spawn_client_handler(ssl, client_fd);
+		// Extract client_id and hostname from certificate or handshake (for now, use 0 and "unknown")
+		// TODO: Parse client_id/hostname from certificate or handshake if available
+		uint64_t client_id = 0;
+		char hostname[256] = "unknown";
+		// Optionally, parse certificate subject for hostname
+		// For now, pass to handler and let first request update
+
+		spawn_client_handler(ssl, client_fd, client_id, hostname);
 	}
 
 	close(server_fd);
