@@ -44,12 +44,20 @@ typedef struct {
 	 */
 	plugin_handle_t (*init)(void);
 
+
 	/**
-	 * Read from local clipboard
+	 * Read from local clipboard (non-blocking)
 	 * Returns: pointer to clipboard_data (allocated by plugin) or NULL if empty
 	 * Caller must call free_clipboard_data() to free the result
 	 */
 	clipboard_data_t* (*read)(plugin_handle_t handle);
+
+	/**
+	 * Read from local clipboard (blocking until new data is available)
+	 * Returns: pointer to clipboard_data (allocated by plugin) or NULL if interrupted
+	 * Caller must call free_clipboard_data() to free the result
+	 */
+	clipboard_data_t* (*read_blocked)(plugin_handle_t handle);
 
 	/**
 	 * Write to local clipboard with metadata

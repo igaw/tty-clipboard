@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <time.h>
+#include <pthread.h>
 
 /**
  * Mock plugin for testing bridge without depending on Wayland/Klipper
@@ -27,6 +28,8 @@ typedef struct {
 	clipboard_metadata_t metadata;
 	volatile int local_change_pending;
 	int local_change_count;
+	pthread_mutex_t change_mutex;
+	pthread_cond_t change_cond;
 } mock_plugin_ctx_t;
 
 static mock_plugin_ctx_t *mock_data = NULL;
@@ -70,11 +73,14 @@ static void generate_local_clipboard_data(mock_plugin_ctx_t *ctx)
 static void signal_local_change(int signum)
 {
 	(void)signum;
-	if (mock_data) {
-		mock_data->local_change_pending = 1;
-		/* Generate new clipboard data immediately */
-		generate_local_clipboard_data(mock_data);
-	}
+	       if (mock_data) {
+		       pthread_mutex_lock(&mock_data->change_mutex);
+		       mock_data->local_change_pending = 1;
+		       /* Generate new clipboard data immediately */
+		       generate_local_clipboard_data(mock_data);
+		       pthread_cond_signal(&mock_data->change_cond);
+		       pthread_mutex_unlock(&mock_data->change_mutex);
+	       }
 }
 
 static plugin_handle_t mock_init(void)
@@ -89,12 +95,52 @@ static plugin_handle_t mock_init(void)
 	ctx->local_change_count = 0;
 	memset(&ctx->metadata, 0, sizeof(ctx->metadata));
 
+	pthread_mutex_init(&ctx->change_mutex, NULL);
+	pthread_cond_init(&ctx->change_cond, NULL);
 	mock_data = ctx;
 
 	/* Setup signal handler for local clipboard changes */
 	signal(SIGUSR1, signal_local_change);
 
 	return ctx;
+}
+
+static clipboard_data_t *mock_read_blocked(plugin_handle_t handle)
+{
+	mock_plugin_ctx_t *ctx = (mock_plugin_ctx_t *)handle;
+	if (!ctx)
+		return NULL;
+
+	       // Block until local_change_pending is set
+	       pthread_mutex_lock(&ctx->change_mutex);
+	       while (!ctx->local_change_pending) {
+		       pthread_cond_wait(&ctx->change_cond, &ctx->change_mutex);
+	       }
+	       ctx->local_change_pending = 0;
+	       pthread_mutex_unlock(&ctx->change_mutex);
+
+	// Return new clipboard data
+	if (!ctx->data || ctx->size == 0)
+		return NULL;
+
+	clipboard_data_t *cdata = allocate_clipboard_data(ctx->size);
+	if (!cdata)
+		return NULL;
+
+	memcpy(cdata->data, ctx->data, ctx->size);
+	memcpy(&cdata->metadata, &ctx->metadata, sizeof(clipboard_metadata_t));
+
+	// Logging: trace read_blocked operation
+	char uuid_buf[33];
+	for (int i = 0; i < 16; ++i) sprintf(&uuid_buf[i*2], "%02x", ctx->metadata.write_uuid[i]);
+	uuid_buf[32] = '\0';
+	LOG_DEBUG("[MOCK] ReadBlocked %zu bytes, hostname: %s, ts: %ld, uuid: %s",
+		ctx->size,
+		ctx->metadata.hostname[0] ? ctx->metadata.hostname : "unknown",
+		(long)ctx->metadata.timestamp,
+		uuid_buf);
+
+	return cdata;
 }
 
 static clipboard_data_t *mock_read(plugin_handle_t handle)
@@ -175,12 +221,14 @@ static void mock_free_clipboard_data(clipboard_data_t *data)
 static void mock_cleanup(plugin_handle_t handle)
 {
 	mock_plugin_ctx_t *ctx = (mock_plugin_ctx_t *)handle;
-	if (ctx) {
-		if (ctx->data)
-			free(ctx->data);
-		free(ctx);
-		mock_data = NULL;
-	}
+	       if (ctx) {
+		       if (ctx->data)
+			       free(ctx->data);
+		       pthread_mutex_destroy(&ctx->change_mutex);
+		       pthread_cond_destroy(&ctx->change_cond);
+		       free(ctx);
+		       mock_data = NULL;
+	       }
 }
 
 /* Export plugin interface */
@@ -189,6 +237,7 @@ const plugin_interface_t mock_plugin = {
 	.version = "1.0",
 	.init = mock_init,
 	.read = mock_read,
+	.read_blocked = mock_read_blocked,
 	.write = mock_write,
 	.free_clipboard_data = mock_free_clipboard_data,
 	.cleanup = mock_cleanup,

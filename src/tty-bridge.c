@@ -641,14 +641,12 @@ tls_setup:
 		ctx->read_ssl_ctx = NULL;
 		return -1;
 	}
-	if (client_id == 0)
-		client_id = 1; // ensure non-zero
+	// TODO: create the client_id and use it consentely everywhere
 	LOG_DEBUG("Generated client_id: %lu", client_id);
-
 	/* Send initial SUBSCRIBE request to start receiving updates */
 	Ttycb__SubscribeRequest sub = TTYCB__SUBSCRIBE_REQUEST__INIT;
 	Ttycb__Envelope env = TTYCB__ENVELOPE__INIT;
-	sub.client_id = client_id;
+	sub.client_id = 1234;
 	env.body_case = TTYCB__ENVELOPE__BODY_SUBSCRIBE;
 	env.subscribe = &sub;
 
@@ -842,10 +840,22 @@ static void *local_to_server_thread(void *arg)
 		ctx->server.host, ctx->server.port, ctx->local_hostname);
 
 	while (!terminate) {
-		clipboard_data_t *data = ctx->plugin->read(ctx->plugin_handle);
-		if (!data) {
-			sleep(1);
-			continue;
+		clipboard_data_t *data = NULL;
+		if (ctx->plugin->read_blocked) {
+			data = ctx->plugin->read_blocked(ctx->plugin_handle);
+		} else {
+			// Fallback to polling if read_blocked is not implemented
+			data = ctx->plugin->read(ctx->plugin_handle);
+			if (!data) {
+				sleep(1);
+				continue;
+			}
+			// If data is same as last_local_data, skip
+			if (ctx->last_local_data && clipboard_data_equal(data, ctx->last_local_data)) {
+				ctx->plugin->free_clipboard_data(data);
+				sleep(1);
+				continue;
+			}
 		}
 		LOG_INFO(
 			"local_to_server_thread (%s:%u): Clipboard event detected, size=%zu, hostname=%s, uuid=%s",
