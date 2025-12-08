@@ -106,6 +106,7 @@ typedef struct {
 } ssl_context_t;
 
 // Shared buffer and mutex (dynamic)
+
 char *shared_buffer = NULL;
 size_t shared_capacity = 0; // allocated size
 size_t shared_length = 0; // used length
@@ -117,13 +118,24 @@ unsigned int gen = 0;
 pthread_mutex_t buffer_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t buffer_cond = PTHREAD_COND_INITIALIZER;
 volatile sig_atomic_t terminate = 0;
-// Message ID counter for tracking clipboard updates (protobuf mode)
 static uint64_t next_message_id = 1;
-// Maximum allowed clipboard size (0 means unlimited)
 static size_t max_buffer_size = 0;
-// Oversize policy: reject (close connection) or drop (discard payload)
 typedef enum { OVERSIZE_REJECT = 0, OVERSIZE_DROP = 1 } oversize_policy_t;
 static oversize_policy_t oversize_policy = OVERSIZE_REJECT;
+
+#define MAX_RECENT_UUIDS 10
+typedef struct {
+	uint64_t client_id;
+	unsigned char recent_uuids[MAX_RECENT_UUIDS][UUID_SIZE];
+	int recent_count;
+} client_uuid_history_t;
+
+// For simplicity, store per-thread history in thread-local storage
+#ifdef __GNUC__
+__thread client_uuid_history_t client_uuid_history = {0};
+#else
+_Thread_local client_uuid_history_t client_uuid_history = {0};
+#endif
 
 // Signal handler
 void handle_sigint(int sig __attribute__((unused)))
@@ -373,6 +385,7 @@ static int handle_write_request(mbedtls_ssl_context *ssl,
 		return send_protobuf_response(ssl, &resp);
 	}
 
+
 	// Store the data and track the write UUID
 	pthread_mutex_lock(&buffer_mutex);
 	if (len > shared_capacity) {
@@ -391,21 +404,31 @@ static int handle_write_request(mbedtls_ssl_context *ssl,
 
 	// Store the UUID of this write operation for deduplication
 	if (write_req->write_uuid.len == UUID_SIZE) {
-		memcpy(shared_write_uuid, write_req->write_uuid.data,
-		       UUID_SIZE);
+		memcpy(shared_write_uuid, write_req->write_uuid.data, UUID_SIZE);
 	} else {
 		memset(shared_write_uuid, 0, UUID_SIZE);
 	}
 
 	// Store hostname and timestamp for debugging
 	if (write_req->hostname) {
-		strncpy(shared_hostname, write_req->hostname,
-			sizeof(shared_hostname) - 1);
+		strncpy(shared_hostname, write_req->hostname, sizeof(shared_hostname) - 1);
 		shared_hostname[sizeof(shared_hostname) - 1] = '\0';
 	} else {
 		shared_hostname[0] = '\0';
 	}
 	shared_timestamp = write_req->timestamp;
+
+	// Track recent UUIDs for this client (thread-local)
+	client_uuid_history.client_id = write_req->client_id;
+	if (write_req->write_uuid.len == UUID_SIZE) {
+		// Shift history if full
+		if (client_uuid_history.recent_count == MAX_RECENT_UUIDS) {
+			memmove(&client_uuid_history.recent_uuids[0], &client_uuid_history.recent_uuids[1], (MAX_RECENT_UUIDS-1)*UUID_SIZE);
+			client_uuid_history.recent_count--;
+		}
+		memcpy(client_uuid_history.recent_uuids[client_uuid_history.recent_count], write_req->write_uuid.data, UUID_SIZE);
+		client_uuid_history.recent_count++;
+	}
 
 	gen++;
 	pthread_cond_broadcast(&buffer_cond);
@@ -508,11 +531,24 @@ static int handle_subscribe_request(mbedtls_ssl_context *ssl,
 		unsigned char uuid_to_send[UUID_SIZE];
 		memcpy(uuid_to_send, shared_write_uuid, UUID_SIZE);
 		char hostname_to_send[256];
-		strncpy(hostname_to_send, shared_hostname,
-			sizeof(hostname_to_send));
+		strncpy(hostname_to_send, shared_hostname, sizeof(hostname_to_send));
 		int64_t timestamp_to_send = shared_timestamp;
 		last_sent_message_id = msg_id;
 		memcpy(last_sent_uuid, uuid_to_send, UUID_SIZE);
+
+		// Check if this subscriber has recently written this UUID
+		int skip = 0;
+		for (int i = 0; i < client_uuid_history.recent_count; ++i) {
+			if (memcmp(client_uuid_history.recent_uuids[i], uuid_to_send, UUID_SIZE) == 0) {
+				skip = 1;
+				break;
+			}
+		}
+		if (skip) {
+			LOG_DEBUG("Skipping update to subscriber (client_id: %lu) for recently written uuid: %s", client_uuid_history.client_id, uuid_to_hex(uuid_to_send));
+			pthread_mutex_unlock(&buffer_mutex);
+			continue;
+		}
 
 		LOG_INFO("Sending update to subscriber: message_id: %lu, hostname: %s, ts: %ld, uuid: %s", msg_id,
 			 hostname_to_send,
@@ -541,7 +577,7 @@ static int handle_subscribe_request(mbedtls_ssl_context *ssl,
 
 		uint64_t pfx = htobe64((uint64_t)outsz);
 		if (ssl_write_all(ssl, &pfx, sizeof(pfx)) < 0 ||
-		    ssl_write_all(ssl, outbuf, outsz) < 0) {
+			ssl_write_all(ssl, outbuf, outsz) < 0) {
 			free(outbuf);
 			return -1;
 		}
