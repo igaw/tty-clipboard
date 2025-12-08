@@ -630,7 +630,6 @@ tls_setup:
 	}
 
 	LOG_INFO("Connected to server");
-	LOG_INFO("Connected to server");
 
 	/* Generate a random client_id using the DRBG, as in tty-client */
 	uint64_t client_id = 0;
@@ -718,7 +717,7 @@ static bridge_ssl_ctx_t *bridge_connect_write_ssl(bridge_server_ctx_t *ctx)
 		close(sock);
 		return NULL;
 	}
-	LOG_INFO("write connection to %s:%u", ctx->server.host,
+	LOG_INFO("write connection opened to %s:%u", ctx->server.host,
 		 ctx->server.port);
 	return ssl_ctx;
 }
@@ -752,8 +751,8 @@ static int send_to_server(bridge_server_ctx_t *ctx,
 		}
 	}
 
-	LOG_INFO("send_to_server: sending protobuf message to %s:%u",
-		 ctx->server.host, ctx->server.port);
+	LOG_INFO("sending protobuf message to %s:%u", ctx->server.host,
+		 ctx->server.port);
 	return send_protobuf_message(&ctx->write_ssl_ctx->ssl, &env.base);
 }
 
@@ -857,74 +856,49 @@ static void *local_to_server_thread(void *arg)
 
 		pthread_mutex_lock(&ctx->data_mutex);
 
-		/* Check if this is the same data we just received from any server */
-		int is_remote = 0;
+		/* New data from local clipboard, forward to all other servers */
 		for (int i = 0; i < num_servers; ++i) {
-			bridge_server_ctx_t *src_ctx = &server_ctxs[i];
-			if (clipboard_data_equal(data,
-						 src_ctx->last_remote_data)) {
-				is_remote = 1;
-				break;
+			bridge_server_ctx_t *dest_ctx = &server_ctxs[i];
+			// Only forward to servers that are not the local clipboard source
+			if (dest_ctx == ctx) {
+				LOG_DEBUG(
+					"Skipping forwarding to own server context %s:%u",
+					dest_ctx->server.host,
+					dest_ctx->server.port);
+				continue;
 			}
-		}
-		if (!is_remote) {
-			/* New data from local clipboard, forward to all other servers */
-			for (int i = 0; i < num_servers; ++i) {
-				bridge_server_ctx_t *dest_ctx = &server_ctxs[i];
-				// Only forward to servers that are not the local clipboard source
-				if (dest_ctx == ctx) {
-					LOG_DEBUG(
-						"Skipping forwarding to own server context %s:%u",
-						dest_ctx->server.host,
-						dest_ctx->server.port);
-					continue;
-				}
-				LOG_INFO(
-					"Forwarding clipboard data (size=%zu, uuid=%s) from local to server %s:%u (local host: %s)",
-					data->size,
-					uuid_to_hex(data->metadata.write_uuid),
+			LOG_INFO(
+				"Forwarding clipboard data (size=%zu, uuid=%s) from local to server %s:%u (local host: %s)",
+				data->size,
+				uuid_to_hex(data->metadata.write_uuid),
+				dest_ctx->server.host, dest_ctx->server.port,
+				dest_ctx->local_hostname);
+			int send_result = send_to_server(dest_ctx, data);
+			if (send_result < 0) {
+				LOG_ERROR(
+					"Failed to forward to server %s:%u (hostname: %s, uuid: %s)",
 					dest_ctx->server.host,
 					dest_ctx->server.port,
-					dest_ctx->local_hostname);
-				int send_result =
-					send_to_server(dest_ctx, data);
-				if (send_result < 0) {
-					LOG_ERROR(
-						"Failed to forward to server %s:%u (hostname: %s, uuid: %s)",
-						dest_ctx->server.host,
-						dest_ctx->server.port,
-						data->metadata.hostname ?
-							data->metadata.hostname :
-							"unknown",
-						uuid_to_hex(
-							data->metadata
-								.write_uuid));
-				} else {
-					LOG_DEBUG(
-						"Successfully forwarded %zu bytes to server %s:%u (hostname: %s, uuid: %s)",
-						data->size,
-						dest_ctx->server.host,
-						dest_ctx->server.port,
-						data->metadata.hostname ?
-							data->metadata.hostname :
-							"unknown",
-						uuid_to_hex(
-							data->metadata
-								.write_uuid));
-				}
+					data->metadata.hostname ?
+						data->metadata.hostname :
+						"unknown",
+					uuid_to_hex(data->metadata.write_uuid));
+			} else {
+				LOG_DEBUG(
+					"Successfully forwarded %zu bytes to server %s:%u (hostname: %s, uuid: %s)",
+					data->size, dest_ctx->server.host,
+					dest_ctx->server.port,
+					data->metadata.hostname ?
+						data->metadata.hostname :
+						"unknown",
+					uuid_to_hex(data->metadata.write_uuid));
 			}
-
-			if (ctx->last_local_data) {
-				ctx->plugin->free_clipboard_data(
-					ctx->last_local_data);
-			}
-			ctx->last_local_data = data;
-		} else {
-			/* This is data we just wrote, skip it to prevent feedback loop */
-			LOG_DEBUG(
-				"Skipping echo: data matches last remote write");
-			ctx->plugin->free_clipboard_data(data);
 		}
+
+		if (ctx->last_local_data) {
+			ctx->plugin->free_clipboard_data(ctx->last_local_data);
+		}
+		ctx->last_local_data = data;
 
 		pthread_mutex_unlock(&ctx->data_mutex);
 		sleep(1);
